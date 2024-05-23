@@ -1,17 +1,21 @@
-use crate::bitboard::Snake;
-
 pub mod bitboard;
+pub mod rhea;
+
+use crate::bitboard::{Direction, Game, Move, Snake};
+use crate::rhea::RHEA;
 
 fn main() {
-    let mut snake = Snake::create(String::from("dancing-horizon"), 100, vec![0, 1, 2]);
+    let s = Snake::create(String::from("test1"), 100, vec![0, 1, 2]);
+    // let s2 = Snake::create(String::from("test2"), 100, vec![10, 9, 8]);
 
-    assert_eq!(snake.head_board, 1);
+    let g = Game::create(vec![s], vec![], 0, 11);
 
-    println!("{:?}!\nLength: {}", snake, snake.length());
+    let mut pop = RHEA::create_population(3, 2);
+    RHEA::score_population(&g, &mut pop, &String::from("test1"));
+    // let mut r = RHEA::create(g, String::from("test1"));
+    
 
-    snake.move_in_dir(&bitboard::Direction::Up, 11);
-
-    assert_eq!(snake.head_board, 1 << 11);
-
-    println!("{:?}!\nLength: {}", snake, snake.length())
+    // println!("{:?}", r);
+    println!("{:?}", pop);
+    // println!("{:?}", fit);
 }

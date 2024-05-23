@@ -1,3 +1,7 @@
+use rand::{
+    distributions::{Distribution, Standard},
+    Rng,
+};
 // BOARD
 // 111 | 112 | 113 | 114 | 115 | 116 | 117 | 118 | 119 | 120 | 121
 // 100 | 101 | 102 | 103 | 104 | 105 | 106 | 107 | 108 | 109 | 110
@@ -13,7 +17,7 @@
 type Board = u128;
 
 const WIDTH: u128 = 11;
-const MAX_HEALTH: usize = 100;
+const MAX_HEALTH: i32= 100;
 
 const LEFT_MASK: u128 = 
 0b0000000_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001;
@@ -27,16 +31,17 @@ const TOP_MASK: u128 =
 const BOTTOM_MASK: u128 = 
 0b0000000_00000000000_00000000000_00000000000_00000000000_00000000000_00000000000_00000000000_00000000000_00000000000_00000000000_11111111111;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Snake {
     pub id: String,
-    pub health: usize,
+    pub health: i32,
     pub body: Vec<u128>,
     pub head_board: Board,
     pub body_board: Board,
     pub length: usize,
 }
 
+#[derive(Debug, Copy, Clone)]
 pub enum Direction {
     Up,
     Down,
@@ -44,8 +49,22 @@ pub enum Direction {
     Right,
 }
 
+impl Distribution<Direction> for Standard {
+ fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Direction{
+        // match rng.gen_range(0, 3) { // rand 0.5, 0.6, 0.7
+        match rng.gen_range(0..=3) { // rand 0.8
+            0 => Direction::Up,
+            1 => Direction::Left,
+            2 => Direction::Right,
+            _ => Direction::Down,
+        }
+    }
+}
+
+
+
 impl Snake {
-    pub fn create(id: String, health: usize, body: Vec<u128>) -> Self {
+    pub fn create(id: String, health: i32, body: Vec<u128>) -> Self {
         let head_board = set_index(0, body[0], 1);
         // Not sure I want the clone here, need to read up on that
         let body_board = body
@@ -320,7 +339,7 @@ mod tests {
 
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Game {
     pub empty: Board,
     pub food: Board,
