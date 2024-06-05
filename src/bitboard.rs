@@ -41,7 +41,7 @@ pub struct Snake {
     pub length: usize,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum Direction {
     Up,
     Down,
@@ -111,12 +111,16 @@ impl Snake {
         self.body[len-2] == self.body[len-1]
     }
 
-    pub fn move_in_dir(&mut self, dir: &Direction, width: u128) {
+    pub fn move_tail(&mut self) {
         let tail = self.body.pop().unwrap();
-        if !self.just_ate() {
+        let len = self.body.len();
+        let just_ate = tail == self.body[len-1];
+        if !just_ate {
             self.body_board = set_index(self.body_board, tail, 0);
         }
+    }
 
+    pub fn move_head(&mut self, dir: &Direction, width: u128) {
         let new_head_b = {
             match dir {
                 Direction::Left => self.head_board >> 1,
@@ -176,7 +180,8 @@ mod tests {
     fn move_up() {
         let mut s = Snake::create(String::from("test"), 100, vec![0,1,2]);
 
-        s.move_in_dir(&super::Direction::Up, 11);
+        s.move_tail();
+        s.move_head(&super::Direction::Up, 11);
 
         assert_eq!(s.body, vec![11,0,1]);
         // assert_eq!(s.head_board, 2048);
@@ -291,6 +296,23 @@ mod tests {
     }
 
     #[test]
+    fn move_back_on_neck_vertical() {
+        let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+
+        let mut g = Game::create(vec![s], vec![], 0, 11);
+        // g.advance_turn(vec![(String::from("test"), Direction::Up)]);
+        // dbg!(&g);
+
+        g.advance_turn(vec![(String::from("test"), Direction::Up)]);
+        g.advance_turn(vec![(String::from("test"), Direction::Down)]);
+        dbg!(&g);
+
+        let s = &g.snakes[0];
+        assert_eq!(s.health, 0);
+    }
+
+
+    #[test]
     fn snake_body_collision() {
         let s = Snake::create(String::from("test1"), 100, vec![0,1,2]);
         let s2 = Snake::create(String::from("test2"), 100, vec![22,11,12,13]);
@@ -333,9 +355,39 @@ mod tests {
         let s = &g.snakes[0];
         let s2 = &g.snakes[1];
         
-        assert_eq!(s.health, 1);
+        assert_eq!(s.health, 0);
         assert_eq!(s2.health, 0);
     }
+
+    #[test]
+    fn body_collision_on_out_of_bounds_snake() {
+        let s = Snake::create(String::from("test1"), 100, vec![0,1,2]);
+        let s2 = Snake::create(String::from("test2"), 100, vec![11,12,13]);
+
+        let mut g = Game::create(vec![s, s2], vec![], 0, 11);
+        g.advance_turn(vec![(String::from("test1"), Direction::Up), (String::from("test2"), Direction::Left)]);
+        dbg!(&g);
+
+        g.print();
+        let s = &g.snakes[0];
+        let s2 = &g.snakes[1];
+        
+        assert_eq!(s.health, 0);
+        assert_eq!(s2.health, 0);
+    }
+    // #[test]
+    // fn move_back_on_neck() {
+    //     let s = Snake::create(String::from("test1"), 100, vec![0,1,2]);
+
+    //     let mut g = Game::create(vec![s], vec![], 0, 11);
+    //     g.advance_turn(vec![(String::from("test1"), Direction::Right)]);
+    //     dbg!(&g);
+
+    //     g.print();
+    //     let s = &g.snakes[0];
+        
+    //     assert_eq!(s.health, 0);
+    // }
 
 }
 
@@ -369,6 +421,7 @@ impl Game {
     pub fn advance_turn(&mut self, moves: Vec<Move>) {
         let mut empty: u128 = !0;
 
+        let mut eliminated: Vec<String> = vec![];
         for snake in &mut self.snakes {
            if snake.is_eliminated() {
                 continue;
@@ -378,12 +431,15 @@ impl Game {
             // check for out of bounds moves
             if !is_dir_valid(&snake, &s_move.1) {
                 // println!("{} out of bounds!", snake.id);
-                snake.health = 0;
+                eliminated.push(snake.id.clone());
+                // snake.health = 0;
+                snake.move_tail();
                 continue;
             }
 
              
-            snake.move_in_dir(&s_move.1, WIDTH);
+            snake.move_tail();
+            snake.move_head(&s_move.1, WIDTH);
 
             snake.health -= 1;
 
@@ -414,17 +470,12 @@ impl Game {
 
 
         // collisions
-        let mut eliminated: Vec<String> = vec![];
         for snake in &mut self.snakes {
             if snake.is_eliminated() {
                 continue;
             }
 
-            if snake.head_board & self.empty > 0 {
-                // println!("{:b}", empty);
-                // println!("{} collision!", snake.id);
-                eliminated.push(snake.id.clone());
-            }
+            let mut had_h2h = false;
 
             for snake_2 in sorted_snakes.as_slice() {
                 if snake_2.0 == snake.id {
@@ -432,11 +483,20 @@ impl Game {
                 }
 
                 if snake.head_board & snake_2.1 > 0 {
+                    had_h2h = true;
                     if snake_2.2 >= snake.length() {
                         // println!("{} head to head!", snake.id);
-                        snake.health = 0; 
+                        eliminated.push(snake.id.clone());
                     }
                 }
+            }
+
+            // If the snake had a head-to-head, then we know the check against
+            // `empty` will return greater than 0, so we skip the check.
+            if !had_h2h && snake.head_board & empty > 0 {
+                // println!("{:b}", empty);
+                // println!("{} collision!", snake.id);
+                eliminated.push(snake.id.clone());
             }
         }
 
@@ -457,28 +517,34 @@ impl Game {
         }
 
         self.empty = new_empty;
+        self.turn += 1;
     }
 
     pub fn print(&self) {
-        let mut game = String::new();
-        for cell in (0..WIDTH*WIDTH).rev() {
-            game.push_str(&format!(" {} ", self.cell_to_string(cell)));
-            game.push_str(&format!("{}",  if cell % 11 == 0 { "\n" } else { "" }));
+        let mut game: Vec<String> = vec![];
+        for y in (0..WIDTH).rev() {
+            for x in 0..WIDTH {
+                let cell = y*WIDTH + x;
+                game.push(format!(" {} ", self.cell_to_string(cell)));
+                // game.push(format!("{}",  if cell % 11 == 0 { "\n" } else { "" }));
+            }
+            game.push("\n".to_string());
         }
 
+        print!("{}", game.iter().fold(String::new(), |a,c| a + c));
     }
 
     fn cell_to_string(&self, index: u128) -> String {
         let b = set_index(0, index, 1);
 
         for (i, s) in self.snakes.iter().enumerate() {
-            if b & s.head_board > 0 {
+            if !s.is_eliminated() && b & s.head_board > 0 {
                 return format!("{}h", i);
             }
         }
 
         for (i, s) in self.snakes.iter().enumerate() {
-            if b & s.body_board > 0 {
+            if !s.is_eliminated() && b & s.body_board > 0 {
                 return format!("{}s", i);
             }
         }
