@@ -8,20 +8,44 @@ use crate::rhea::RHEA;
 use actix_web::{
     get, middleware, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder,
 };
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+struct DHState {
+    games: Mutex<HashMap<String, RHEA>>,
+}
 
 async fn info() -> impl Responder {
     HttpResponse::Ok().json(SnakeInfo {
-        color: "blue".to_string(),
-        head: "beluga".to_string(),
-        tail: "curled".to_string(),
+        color: "#73937E".to_string(), // cambridge blue
+        head: "space-helmet".to_string(),
+        tail: "mlh-gene".to_string(),
     })
 }
 
-async fn get_move(state: web::Json<MoveRequest>) -> impl Responder {
-    println!("{:?}", state);
+async fn get_move(context: web::Data<DHState>, state: web::Json<MoveRequest>) -> impl Responder {
+    println!("Turn: {:?}", state.turn);
+
+    let game = battlesnake::request_to_game(&state.0);
+    let mut all_games = context.games.lock().expect("Failed to get games lock?");
+
+    let mut ga: RHEA = match all_games.get(&state.game.id) {
+        Some(g) => g.clone().update_game(game),
+        None => RHEA::create(game, state.you.id.clone()),
+    };
+
+    // let mut ga = RHEA::create(game, state.you.id.clone());
+    for _ in 0..50 {
+        ga = ga.evolve();
+    }
+
+    let best_move = ga.get_move();
+
+    all_games.insert(state.game.id.clone(), ga);
+    println!("Response: {:?}", best_move);
 
     HttpResponse::Ok().json(MoveResponse {
-        r#move: "left".to_string(),
+        r#move: battlesnake::direction_to_string(best_move),
     })
 }
 
@@ -42,11 +66,16 @@ async fn main() -> std::io::Result<()> {
     // let best_move = r.get_move();
 
     // println!("move: {:?}", best_move);
-    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
 
-    HttpServer::new(|| {
+    let context = web::Data::new(DHState {
+        games: Mutex::new(HashMap::new()),
+    });
+
+    HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
+            .app_data(context.clone())
             .route("/move", web::post().to(get_move))
             .route("/", web::get().to(info))
     })

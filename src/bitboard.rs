@@ -391,6 +391,7 @@ mod tests {
 
 }
 
+// TODO: Rename this to 'Board' to be in line with the api
 #[derive(Debug, Clone)]
 pub struct Game {
     pub empty: Board,

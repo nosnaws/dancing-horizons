@@ -35,11 +35,11 @@ pub struct Canditate {
 
 impl RHEA {
     pub fn create(game: Game, player: String) -> Self {
-        let mutation_chance = 0.2;
-        let crossover_chance = 0.9;
-        let geno_length = 3;
-        let population_size = 25;
-        let tournament_size = 10;
+        let mutation_chance = 0.3;
+        let crossover_chance = 1.0;
+        let geno_length = 10;
+        let population_size = 50;
+        let tournament_size = 5;
         let mut pop: Population = create_population(population_size, geno_length)
             .iter()
             .map(|c| Canditate {
@@ -66,8 +66,29 @@ impl RHEA {
         return best.genotype.get(0).unwrap().clone();
     }
 
-    // pub fn update_game(&self, game: Game) -> Self {
-    // }
+    pub fn update_game(&self, game: Game) -> Self {
+        let updated_pop = self
+            .pop
+            .iter()
+            .map(|c| {
+                let (_, rest) = c.genotype.split_at(1);
+
+                let mut new_geno = rest.to_vec();
+                new_geno.push(get_random_move());
+
+                let mut new_cand = create_candidate(new_geno);
+                new_cand.fitness = fitness(&game, &self.player, &new_cand);
+
+                return new_cand;
+            })
+            .collect();
+
+        Self {
+            game,
+            pop: updated_pop,
+            ..self.clone()
+        }
+    }
 
     pub fn evolve(&self) -> Self {
         println!("apex {:?}", self.pop.get(0).unwrap());
@@ -79,14 +100,17 @@ impl RHEA {
             .flat_map(|_| {
                 let p1 = self.select_parent(&self.pop);
                 let p2 = self.select_parent(&self.pop);
+                // println!("parent 1 {:?}", p1);
+                // println!("parent 2 {:?}", p2);
 
                 return self.crossover(p1, p2);
             })
             // Leave room for the "apex"
             .take(self.population_size - 1)
-            .chain(iter::once(apex))
             //  mutate new population
             .map(|c| self.mutate(&c))
+            .chain(iter::once(apex))
+            // .map(|c| self.maybe_fix_bad_moves(&c))
             //  calculate fitness of population (& sort?)
             .map(|c| Canditate {
                 fitness: fitness(&self.game, &self.player, &c),
@@ -98,7 +122,7 @@ impl RHEA {
 
         new_pop.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
 
-        // println!("{:?}", new_pop);
+        // println!("new pop {:?}", new_pop);
 
         //  return with new population
         Self {
@@ -171,6 +195,46 @@ impl RHEA {
         // select the one with the best fitness
         return tournament.get(0).unwrap();
     }
+
+    fn maybe_fix_bad_moves(&self, c: &Canditate) -> Canditate {
+        let mut geno = c.genotype.clone();
+        for i in 0..self.geno_length {
+            let first_move = geno[i];
+            if i + 1 >= self.geno_length {
+                break;
+            }
+            let second_move = geno[i + 1];
+
+            if is_bad_move(first_move, second_move) {
+                let n = get_random_move();
+                geno[i + 1] = n
+            }
+        }
+
+        return create_candidate(geno);
+    }
+}
+
+// returns true if the second argument is a bad move
+fn is_bad_move(m1: Direction, m2: Direction) -> bool {
+    match m1 {
+        Direction::Up => match m2 {
+            Direction::Down => true,
+            _ => false,
+        },
+        Direction::Down => match m2 {
+            Direction::Up => true,
+            _ => false,
+        },
+        Direction::Left => match m2 {
+            Direction::Right => true,
+            _ => false,
+        },
+        Direction::Right => match m2 {
+            Direction::Left => true,
+            _ => false,
+        },
+    }
 }
 
 pub fn score_population(g: &Game, pop: &mut Population, player: &String) {
@@ -195,9 +259,10 @@ pub fn score_game(g: &Game, player: &String) -> i32 {
     let mut snakes_alive = 0;
 
     for snake in &g.snakes {
-        if snake.id == *player && snake.is_eliminated() {
-            return 0;
-        } else {
+        if snake.id == *player {
+            if snake.is_eliminated() {
+                return 0;
+            }
             score += snake.health;
         }
 
@@ -227,7 +292,7 @@ fn create_candidate(genotype: Vec<Direction>) -> Canditate {
     }
 }
 
-pub fn get_random_moves(n: usize) -> Vec<Direction> {
+fn get_random_moves(n: usize) -> Vec<Direction> {
     let mut moves = vec![];
 
     for _i in 0..n {
@@ -237,7 +302,7 @@ pub fn get_random_moves(n: usize) -> Vec<Direction> {
     return moves;
 }
 
-pub fn get_random_move() -> Direction {
+fn get_random_move() -> Direction {
     rand::random()
 }
 
