@@ -35,7 +35,7 @@ async fn get_move(context: web::Data<DHState>, state: web::Json<MoveRequest>) ->
     };
 
     // let mut ga = RHEA::create(game, state.you.id.clone());
-    for _ in 0..50 {
+    for _ in 0..400 {
         ga = ga.evolve();
     }
 

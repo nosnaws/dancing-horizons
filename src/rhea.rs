@@ -10,8 +10,9 @@
 // - allow starting with an initial population
 
 use crate::bitboard::{Direction, Game};
+use rand::rngs::SmallRng;
 use rand::rngs::ThreadRng;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use std::iter;
 
 #[derive(Debug, Clone)]
@@ -19,9 +20,7 @@ pub struct RHEA {
     game: Game,
     player: String,
     pop: Vec<Canditate>,
-    mutation_chance: f32,
     crossover_chance: f32,
-    geno_length: usize,
     tournament_size: u32,
     population_size: usize,
 }
@@ -33,14 +32,15 @@ pub struct Canditate {
     fitness: i32,
 }
 
+const GENO_LENGTH: usize = 20;
+const MUTATION_CHANCE: f32 = 0.3;
+
 impl RHEA {
     pub fn create(game: Game, player: String) -> Self {
-        let mutation_chance = 0.3;
         let crossover_chance = 1.0;
-        let geno_length = 10;
         let population_size = 50;
-        let tournament_size = 5;
-        let mut pop: Population = create_population(population_size, geno_length)
+        let tournament_size = 3;
+        let mut pop: Population = create_population(population_size, GENO_LENGTH)
             .iter()
             .map(|c| Canditate {
                 fitness: fitness(&game, &player, &c),
@@ -53,9 +53,7 @@ impl RHEA {
             game,
             player,
             pop,
-            mutation_chance,
             crossover_chance,
-            geno_length,
             tournament_size,
             population_size,
         }
@@ -67,6 +65,7 @@ impl RHEA {
     }
 
     pub fn update_game(&self, game: Game) -> Self {
+        let mut rng = SmallRng::from_entropy();
         let updated_pop = self
             .pop
             .iter()
@@ -74,7 +73,7 @@ impl RHEA {
                 let (_, rest) = c.genotype.split_at(1);
 
                 let mut new_geno = rest.to_vec();
-                new_geno.push(get_random_move());
+                new_geno.push(rng.gen());
 
                 let mut new_cand = create_candidate(new_geno);
                 new_cand.fitness = fitness(&game, &self.player, &new_cand);
@@ -94,12 +93,13 @@ impl RHEA {
         println!("apex {:?}", self.pop.get(0).unwrap());
         let apex = create_candidate(self.pop.get(0).unwrap().genotype.clone());
 
+        let mut rng = SmallRng::from_entropy();
         let pairs = (self.population_size / 2) + (self.population_size % 2);
         let mut new_pop: Population = (0..pairs)
             //  create new population via tournament selection & crossover
             .flat_map(|_| {
-                let p1 = self.select_parent(&self.pop);
-                let p2 = self.select_parent(&self.pop);
+                let p1 = self.select_parent(&mut rng, &self.pop);
+                let p2 = self.select_parent(&mut rng, &self.pop);
                 // println!("parent 1 {:?}", p1);
                 // println!("parent 2 {:?}", p2);
 
@@ -135,28 +135,40 @@ impl RHEA {
     //  take first move of best individual
 
     fn mutate(&self, candidate: &Canditate) -> Canditate {
-        let mut rng = rand::thread_rng();
+        let mut rng = SmallRng::from_entropy();
 
-        let m: f32 = rng.gen();
+        // rng.gen()
+        let mut mut_chances = [0f32; GENO_LENGTH];
+        rng.fill(&mut mut_chances);
 
-        if m < 1.0 - self.mutation_chance {
-            return create_candidate(candidate.genotype.clone());
-        }
+        // let mut new_geno = vec![];
+        // for (i, mc) in mut_chances {
+        //         if mc < 1.0 - MUTATION_CHANCE {
+        //             return *candidate.genotype[i];
+        //         }
 
-        let i: usize = get_random_index(self.geno_length);
-        let new_move = get_random_move();
+        //         return get_random_move();
 
-        let mut geno = candidate.genotype.clone();
+        // }
+        let mutated_geno = mut_chances
+            .iter()
+            .enumerate()
+            .map(|(i, mc)| {
+                if *mc < 1.0 - MUTATION_CHANCE {
+                    return candidate.genotype[i];
+                }
 
-        geno[i] = new_move;
+                return rng.gen();
+            })
+            .collect();
 
-        return create_candidate(geno);
+        return create_candidate(mutated_geno);
     }
 
     fn crossover(&self, c1: &Canditate, c2: &Canditate) -> Vec<Canditate> {
         // probably want this
         // to be fixed length array
-        let mut rng = rand::thread_rng();
+        let mut rng = SmallRng::from_entropy();
 
         let m: f32 = rng.gen();
 
@@ -171,7 +183,7 @@ impl RHEA {
         // TODO: Cross over has the chance to happen at the first or last index
         // of the genotype, effectively not doing a crossover. Might want to
         // eliminate that chance by only generating random numbers between 1 and length - 1.
-        let cross_over_point = get_random_index(self.geno_length);
+        let cross_over_point = get_random_index(&mut rng, GENO_LENGTH);
         // create 2 new candidates with each half of parent's genotype at crossover point
         let c1_pair = c1.genotype.split_at(cross_over_point);
         let c2_pair = c2.genotype.split_at(cross_over_point);
@@ -182,11 +194,11 @@ impl RHEA {
         ];
     }
 
-    fn select_parent<'a>(&self, pop: &'a Population) -> &'a Canditate {
+    fn select_parent<'a>(&self, rng: &mut SmallRng, pop: &'a Population) -> &'a Canditate {
         let pop_length = self.pop.len();
         // randomly choose N candidates
         let mut tournament: Vec<&Canditate> = (0..self.tournament_size)
-            .map(|_| pop.get(get_random_index(pop_length)).unwrap())
+            .map(|_| pop.get(get_random_index(rng, pop_length)).unwrap())
             .collect();
 
         // Using an unstable sort to add some more randomness into the process
@@ -196,23 +208,23 @@ impl RHEA {
         return tournament.get(0).unwrap();
     }
 
-    fn maybe_fix_bad_moves(&self, c: &Canditate) -> Canditate {
-        let mut geno = c.genotype.clone();
-        for i in 0..self.geno_length {
-            let first_move = geno[i];
-            if i + 1 >= self.geno_length {
-                break;
-            }
-            let second_move = geno[i + 1];
+    // fn maybe_fix_bad_moves(&self, c: &Canditate) -> Canditate {
+    //     let mut geno = c.genotype.clone();
+    //     for i in 0..GENO_LENGTH {
+    //         let first_move = geno[i];
+    //         if i + 1 >= GENO_LENGTH {
+    //             break;
+    //         }
+    //         let second_move = geno[i + 1];
 
-            if is_bad_move(first_move, second_move) {
-                let n = get_random_move();
-                geno[i + 1] = n
-            }
-        }
+    //         if is_bad_move(first_move, second_move) {
+    //             let n = get_random_move();
+    //             geno[i + 1] = n
+    //         }
+    //     }
 
-        return create_candidate(geno);
-    }
+    //     return create_candidate(geno);
+    // }
 }
 
 // returns true if the second argument is a bad move
@@ -261,9 +273,9 @@ pub fn score_game(g: &Game, player: &String) -> i32 {
     for snake in &g.snakes {
         if snake.id == *player {
             if snake.is_eliminated() {
-                return 0;
+                return -1000;
             }
-            score += snake.health;
+            // score += snake.health;
         }
 
         if !snake.is_eliminated() {
@@ -294,20 +306,17 @@ fn create_candidate(genotype: Vec<Direction>) -> Canditate {
 
 fn get_random_moves(n: usize) -> Vec<Direction> {
     let mut moves = vec![];
+    let mut rng = SmallRng::from_entropy();
 
     for _i in 0..n {
-        moves.push(get_random_move());
+        moves.push(rng.gen());
     }
 
     return moves;
 }
 
-fn get_random_move() -> Direction {
-    rand::random()
-}
 
-fn get_random_index(len: usize) -> usize {
-    let mut rng = rand::thread_rng();
+fn get_random_index(rng: &mut SmallRng, len: usize) -> usize {
     rng.gen_range(0..len).try_into().unwrap()
 }
 
