@@ -35,7 +35,7 @@ async fn get_move(context: web::Data<DHState>, state: web::Json<MoveRequest>) ->
     };
 
     // let mut ga = RHEA::create(game, state.you.id.clone());
-    for _ in 0..400 {
+    for _ in 0..500 {
         ga = ga.evolve();
     }
 
@@ -79,7 +79,7 @@ async fn main() -> std::io::Result<()> {
             .route("/move", web::post().to(get_move))
             .route("/", web::get().to(info))
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("127.0.0.1", 9999))?
     .run()
     .await
 }

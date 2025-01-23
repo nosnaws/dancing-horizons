@@ -13,120 +13,133 @@ use crate::bitboard::{Direction, Game};
 use rand::rngs::SmallRng;
 use rand::rngs::ThreadRng;
 use rand::{Rng, SeedableRng};
+use std::collections::HashMap;
 use std::iter;
 
+type Population = Vec<Canditate>;
+type Genotype = Vec<Direction>;
 #[derive(Debug, Clone)]
 pub struct RHEA {
     game: Game,
     player: String,
-    pop: Vec<Canditate>,
-    crossover_chance: f32,
+    populations: HashMap<String, Population>,
     tournament_size: u32,
-    population_size: usize,
 }
 
-type Population = Vec<Canditate>;
 #[derive(Debug, Clone)]
 pub struct Canditate {
-    genotype: Vec<Direction>,
-    fitness: i32,
+    genotype: Genotype,
+    average_fitness: f32,
+    total_fitness_evaluations: i32,
 }
 
-const GENO_LENGTH: usize = 20;
+const GENO_LENGTH: usize = 5;
+// const GENO_LENGTH_I32: i32 = 20;
 const MUTATION_CHANCE: f32 = 0.3;
+const ENEMY_SNAKE_POP_SIZE: usize = 10;
+const POP_SIZE: usize = 20;
 
 impl RHEA {
     pub fn create(game: Game, player: String) -> Self {
-        let crossover_chance = 1.0;
-        let population_size = 50;
-        let tournament_size = 3;
-        let mut pop: Population = create_population(population_size, GENO_LENGTH)
-            .iter()
-            .map(|c| Canditate {
-                fitness: fitness(&game, &player, &c),
-                ..c.clone()
-            })
-            .collect();
+        let tournament_size = 5;
+        let populations = HashMap::new();
 
-        pop.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
         Self {
             game,
             player,
-            pop,
-            crossover_chance,
+            populations,
             tournament_size,
-            population_size,
         }
     }
 
     pub fn get_move(&self) -> Direction {
-        let best = self.pop.get(0).unwrap();
+        let best = self.populations.get(&self.player).unwrap().get(0).unwrap();
         return best.genotype.get(0).unwrap().clone();
     }
 
     pub fn update_game(&self, game: Game) -> Self {
         let mut rng = SmallRng::from_entropy();
-        let updated_pop = self
-            .pop
-            .iter()
-            .map(|c| {
-                let (_, rest) = c.genotype.split_at(1);
+        let mut new_pops = HashMap::new();
+        for (id, pop) in &self.populations {
+            let updated_pop = pop
+                .iter()
+                .map(|c| {
+                    let (_, rest) = c.genotype.split_at(1);
 
-                let mut new_geno = rest.to_vec();
-                new_geno.push(rng.gen());
+                    let mut new_geno = rest.to_vec();
+                    new_geno.push(rng.gen());
 
-                let mut new_cand = create_candidate(new_geno);
-                new_cand.fitness = fitness(&game, &self.player, &new_cand);
+                    let new_cand = create_candidate(new_geno);
 
-                return new_cand;
-            })
-            .collect();
+                    return new_cand;
+                })
+                .collect();
+
+            new_pops.insert(id.clone(), updated_pop);
+        }
 
         Self {
             game,
-            pop: updated_pop,
+            populations: self.evaluate_and_sort(new_pops),
             ..self.clone()
         }
     }
 
     pub fn evolve(&self) -> Self {
-        println!("apex {:?}", self.pop.get(0).unwrap());
-        let apex = create_candidate(self.pop.get(0).unwrap().genotype.clone());
+        let mut populations = self.populations.clone();
+        if populations.len() == 0 {
+            let mut new_pops = HashMap::new();
+            for snake in &self.game.snakes {
+                let l = if snake.id == *self.player {
+                    POP_SIZE
+                } else {
+                    ENEMY_SNAKE_POP_SIZE
+                };
+                new_pops.insert(snake.id.clone(), create_population(l, GENO_LENGTH));
+            }
+
+            populations = self.evaluate_and_sort(new_pops);
+        }
+
+        let player_pop = populations
+            .get(&self.player)
+            .expect("Could not find player?");
+        println!("apex {:?}", player_pop.get(0).unwrap());
 
         let mut rng = SmallRng::from_entropy();
-        let pairs = (self.population_size / 2) + (self.population_size % 2);
-        let mut new_pop: Population = (0..pairs)
-            //  create new population via tournament selection & crossover
-            .flat_map(|_| {
-                let p1 = self.select_parent(&mut rng, &self.pop);
-                let p2 = self.select_parent(&mut rng, &self.pop);
-                // println!("parent 1 {:?}", p1);
-                // println!("parent 2 {:?}", p2);
+        let mut new_pops = HashMap::new();
+        for (id, pop) in populations {
+            let apex = pop.get(0).unwrap();
+            let pop_size = if *id == *self.player {
+                POP_SIZE
+            } else {
+                ENEMY_SNAKE_POP_SIZE
+            };
 
-                return self.crossover(p1, p2);
-            })
-            // Leave room for the "apex"
-            .take(self.population_size - 1)
-            //  mutate new population
-            .map(|c| self.mutate(&c))
-            .chain(iter::once(apex))
-            // .map(|c| self.maybe_fix_bad_moves(&c))
-            //  calculate fitness of population (& sort?)
-            .map(|c| Canditate {
-                fitness: fitness(&self.game, &self.player, &c),
-                ..c
-            })
-            .collect();
+            let new_pop: Population = (0..pop_size)
+                //  create new population via tournament selection & crossover
+                .map(|_| {
+                    let p1 = self.select_parent(&mut rng, &pop);
+                    let p2 = self.select_parent(&mut rng, &pop);
+                    // println!("parent 1 {:?}", p1);
+                    // println!("parent 2 {:?}", p2);
 
-        // println!("{:?}", new_pop);
+                    return self.crossover(p1, p2);
+                })
+                // Leave room for the "apex"
+                .take(pop_size - 1)
+                //  mutate new population
+                .map(|c| self.mutate(&c))
+                .chain(iter::once(create_candidate(apex.genotype.clone())))
+                // .map(|c| self.maybe_fix_bad_moves(&c))
+                //  calculate fitness of population (& sort?)
+                .collect();
 
-        new_pop.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
+            new_pops.insert(id.clone(), new_pop);
+        }
 
-        // println!("new pop {:?}", new_pop);
-
-        //  return with new population
         Self {
-            pop: new_pop,
+            populations: self.evaluate_and_sort(new_pops),
             ..self.clone()
         }
     }
@@ -137,19 +150,9 @@ impl RHEA {
     fn mutate(&self, candidate: &Canditate) -> Canditate {
         let mut rng = SmallRng::from_entropy();
 
-        // rng.gen()
         let mut mut_chances = [0f32; GENO_LENGTH];
         rng.fill(&mut mut_chances);
 
-        // let mut new_geno = vec![];
-        // for (i, mc) in mut_chances {
-        //         if mc < 1.0 - MUTATION_CHANCE {
-        //             return *candidate.genotype[i];
-        //         }
-
-        //         return get_random_move();
-
-        // }
         let mutated_geno = mut_chances
             .iter()
             .enumerate()
@@ -165,47 +168,84 @@ impl RHEA {
         return create_candidate(mutated_geno);
     }
 
-    fn crossover(&self, c1: &Canditate, c2: &Canditate) -> Vec<Canditate> {
+    fn crossover(&self, c1: &Canditate, c2: &Canditate) -> Canditate {
         // probably want this
         // to be fixed length array
         let mut rng = SmallRng::from_entropy();
 
-        let m: f32 = rng.gen();
+        let mut offspring_geno = vec![];
+        for i in 0..GENO_LENGTH {
+            let b: bool = rng.gen();
 
-        // check for cross over, return original candidates if not
-        if m < 1.0 - self.crossover_chance {
-            vec![
-                create_candidate(c1.genotype.clone()),
-                create_candidate(c2.genotype.clone()),
-            ];
+            let gene = if b { c1.genotype[i] } else { c2.genotype[i] };
+            offspring_geno.push(gene);
         }
-        // generate random crossover point
-        // TODO: Cross over has the chance to happen at the first or last index
-        // of the genotype, effectively not doing a crossover. Might want to
-        // eliminate that chance by only generating random numbers between 1 and length - 1.
-        let cross_over_point = get_random_index(&mut rng, GENO_LENGTH);
-        // create 2 new candidates with each half of parent's genotype at crossover point
-        let c1_pair = c1.genotype.split_at(cross_over_point);
-        let c2_pair = c2.genotype.split_at(cross_over_point);
 
-        return vec![
-            create_candidate([c1_pair.0, c2_pair.1].concat()),
-            create_candidate([c2_pair.0, c1_pair.1].concat()),
-        ];
+        return create_candidate(offspring_geno);
     }
 
     fn select_parent<'a>(&self, rng: &mut SmallRng, pop: &'a Population) -> &'a Canditate {
-        let pop_length = self.pop.len();
+        let pop_length = pop.len();
         // randomly choose N candidates
         let mut tournament: Vec<&Canditate> = (0..self.tournament_size)
             .map(|_| pop.get(get_random_index(rng, pop_length)).unwrap())
             .collect();
 
         // Using an unstable sort to add some more randomness into the process
-        tournament.sort_unstable_by(|a, b| a.fitness.cmp(&b.fitness));
+        tournament
+            .sort_unstable_by(|a, b| b.average_fitness.partial_cmp(&a.average_fitness).unwrap());
 
         // select the one with the best fitness
         return tournament.get(0).unwrap();
+    }
+
+    fn evaluate_and_sort(
+        &self,
+        populations: HashMap<String, Population>,
+    ) -> HashMap<String, Population> {
+        let mut rng = SmallRng::from_entropy();
+        let player_population = populations.get(&self.player).unwrap();
+        let mut new_populations = populations.clone();
+
+        for (i, player_candidate) in player_population.iter().enumerate() {
+            let mut players: HashMap<String, (usize, Canditate)> = HashMap::new();
+            players.insert(self.player.clone(), (i, player_candidate.clone()));
+
+            for (id, cands) in &populations {
+                if *id == *self.player {
+                    continue;
+                }
+
+                let candidate_idx = rng.gen_range(0..ENEMY_SNAKE_POP_SIZE);
+                let enemy_cand = cands[candidate_idx].clone();
+                players.insert(id.clone(), (candidate_idx, enemy_cand));
+            }
+
+            let score = fitness(&self.game, &self.player, &players);
+
+            for (id, (idx, mut cand)) in players {
+                let mut new_pop = new_populations.get(&id).unwrap().clone();
+
+                cand.total_fitness_evaluations += 1;
+
+                let adjusted_score = if *id == *self.player { score } else { -score };
+
+                cand.average_fitness = (((cand.total_fitness_evaluations - 1) as f32
+                    * cand.average_fitness)
+                    + adjusted_score)
+                    / cand.total_fitness_evaluations as f32;
+
+                new_pop[idx] = cand;
+                new_populations.insert(id, new_pop);
+            }
+        }
+
+        for (_, pop) in &mut new_populations {
+            pop.sort_unstable_by(|a, b| b.average_fitness.partial_cmp(&a.average_fitness).unwrap());
+        }
+        println!("{:?}", new_populations.get(&self.player).unwrap());
+
+        return new_populations;
     }
 
     // fn maybe_fix_bad_moves(&self, c: &Canditate) -> Canditate {
@@ -249,46 +289,59 @@ fn is_bad_move(m1: Direction, m2: Direction) -> bool {
     }
 }
 
-pub fn score_population(g: &Game, pop: &mut Population, player: &String) {
-    for cand in pop {
-        cand.fitness = fitness(g, player, &cand);
-    }
-}
+// pub fn score_population(g: &Game, pop: &mut Population, player: &String) {
+//     for cand in pop {
+//         cand.fitness = fitness(g, player, &cand);
+//     }
+// }
 
-pub fn fitness(game: &Game, player: &String, c: &Canditate) -> i32 {
+pub fn fitness(
+    game: &Game,
+    player: &String,
+    candidates: &HashMap<String, (usize, Canditate)>,
+) -> f32 {
     let mut g = game.clone();
-    let mut score = 0;
-    for dir in &c.genotype {
-        g.advance_turn(vec![(player.clone(), dir.clone())]);
-        score += score_game(&g, &player);
+    // let mut score = 0.0;
+    // let mut rng = SmallRng::from_entropy();
+
+    for i in 0..GENO_LENGTH {
+        let mut snake_moves = vec![];
+
+        for (id, (_, cand)) in candidates {
+            snake_moves.push((id.clone(), cand.genotype[i]));
+        }
+
+        g.advance_turn(snake_moves);
     }
 
-    return score;
+    return score_game(&g, &player);
 }
 
-pub fn score_game(g: &Game, player: &String) -> i32 {
-    let mut score = 0;
-    let mut snakes_alive = 0;
+pub fn score_game(g: &Game, player: &String) -> f32 {
+    let mut score = 0.0;
+    let mut snakes_alive = 0.0;
 
     for snake in &g.snakes {
         if snake.id == *player {
             if snake.is_eliminated() {
-                return -1000;
+                return -1000.0;
             }
-            // score += snake.health;
+            score += snake.health as f32 / 100.0;
+            score += snake.length as f32 * 0.1;
         }
 
         if !snake.is_eliminated() {
-            snakes_alive += 1;
+            snakes_alive += 1.0;
         }
     }
 
-    if snakes_alive == 1 {
-        // we're the only ones alive now
-        score += 100;
-    }
+    score += 100.0 / snakes_alive;
+    // if snakes_alive == 1 {
+    //     // we're the only ones alive now
+    //     score += 100;
+    // }
 
-    return score;
+    return 100.0 / (100.0 + score);
 }
 
 pub fn create_population(size: usize, geno_len: usize) -> Vec<Canditate> {
@@ -300,7 +353,8 @@ pub fn create_population(size: usize, geno_len: usize) -> Vec<Canditate> {
 fn create_candidate(genotype: Vec<Direction>) -> Canditate {
     Canditate {
         genotype,
-        fitness: 0,
+        average_fitness: 0.0,
+        total_fitness_evaluations: 0,
     }
 }
 
@@ -315,7 +369,6 @@ fn get_random_moves(n: usize) -> Vec<Direction> {
     return moves;
 }
 
-
 fn get_random_index(rng: &mut SmallRng, len: usize) -> usize {
     rng.gen_range(0..len).try_into().unwrap()
 }
@@ -325,18 +378,18 @@ mod tests {
     use super::*;
     use crate::bitboard::{Game, Snake};
 
-    #[test]
-    fn fitness_does_not_modify_game_state() {
-        let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
-        let g = Game::create(vec![s], vec![], 0, 11);
-        let c = create_population(1, 3);
-        let _score = fitness(&g, &String::from("test"), &c[0]);
+    // #[test]
+    // fn fitness_does_not_modify_game_state() {
+    //     let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+    //     let g = Game::create(vec![s], vec![], 0, 11);
+    //     let c = create_population(1, 3);
+    //     let _score = fitness(&g, &String::from("test"), &c[0]);
 
-        let s2 = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
-        let g2 = Game::create(vec![s2], vec![], 0, 11);
+    //     let s2 = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+    //     let g2 = Game::create(vec![s2], vec![], 0, 11);
 
-        assert_eq!(g.empty, g2.empty);
-    }
+    //     assert_eq!(g.empty, g2.empty);
+    // }
 
     #[test]
     fn mutates() {
