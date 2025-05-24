@@ -455,7 +455,7 @@ impl Game {
             }
 
             snake.move_tail();
-            snake.move_head(&s_move, self.width.try_into().unwrap());
+            snake.move_head(&s_move, self.width as u128);
 
             snake.health -= 1;
 

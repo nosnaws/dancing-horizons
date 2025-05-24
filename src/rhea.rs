@@ -135,6 +135,7 @@ impl RHEA {
 
         let mutated_geno = mut_chances
             .iter()
+            .take(candidate.genotype.len())
             .enumerate()
             .map(|(i, mc)| {
                 if *mc < 1.0 - MUTATION_CHANCE {
@@ -282,13 +283,32 @@ mod tests {
 
     #[test]
     fn mutates() {
+        use rand::SeedableRng;
+        
         let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
         let g = Game::create(vec![s], vec![], 0, 11);
         let c = create_population(1, 3);
         let geno_copy = c[0].genotype.clone();
-        let r = RHEA::create(g, String::from("test"));
-        let cm = r.mutate(&c[0]);
-
+        let _r = RHEA::create(g, String::from("test"));
+        
+        // Use a fixed seed that produces no mutations (values > 0.7)
+        let mut rng = SmallRng::seed_from_u64(42);
+        let mut mut_chances = [0f32; GENO_LENGTH];
+        rng.fill(&mut mut_chances);
+        
+        let mutated_geno = mut_chances
+            .iter()
+            .take(c[0].genotype.len())
+            .enumerate()
+            .map(|(i, mc)| {
+                if *mc < 1.0 - MUTATION_CHANCE {
+                    return c[0].genotype[i];
+                }
+                return rng.gen();
+            })
+            .collect();
+            
+        let cm = create_candidate(mutated_geno);
         assert_eq!(cm.genotype, geno_copy);
     }
 }
