@@ -4,14 +4,10 @@
 // TODO:
 // - "fix" bad moves in candidates
 // - cross over function (uniform)
-// - mutation function
 // - tournament selection
-// - apex selection
-// - allow starting with an initial population
 
 use crate::bitboard::{Direction, Game};
 use rand::rngs::SmallRng;
-use rand::rngs::ThreadRng;
 use rand::{Rng, SeedableRng};
 use std::iter;
 
@@ -19,15 +15,15 @@ use std::iter;
 pub struct RHEA {
     game: Game,
     player: String,
-    pop: Vec<Canditate>,
+    pop: Vec<Individual>,
     crossover_chance: f32,
     tournament_size: u32,
     population_size: usize,
 }
 
-type Population = Vec<Canditate>;
+type Population = Vec<Individual>;
 #[derive(Debug, Clone)]
-pub struct Canditate {
+pub struct Individual {
     genotype: Vec<Direction>,
     fitness: i32,
 }
@@ -42,7 +38,7 @@ impl RHEA {
         let tournament_size = 3;
         let mut pop: Population = create_population(population_size, GENO_LENGTH)
             .iter()
-            .map(|c| Canditate {
+            .map(|c| Individual {
                 fitness: fitness(&game, &player, &c),
                 ..c.clone()
             })
@@ -112,7 +108,7 @@ impl RHEA {
             .chain(iter::once(apex))
             // .map(|c| self.maybe_fix_bad_moves(&c))
             //  calculate fitness of population (& sort?)
-            .map(|c| Canditate {
+            .map(|c| Individual {
                 fitness: fitness(&self.game, &self.player, &c),
                 ..c
             })
@@ -131,25 +127,12 @@ impl RHEA {
         }
     }
 
-    // pub fn get_move() -> Direction
-    //  take first move of best individual
-
-    fn mutate(&self, candidate: &Canditate) -> Canditate {
+    fn mutate(&self, candidate: &Individual) -> Individual {
         let mut rng = SmallRng::from_entropy();
 
-        // rng.gen()
         let mut mut_chances = [0f32; GENO_LENGTH];
         rng.fill(&mut mut_chances);
 
-        // let mut new_geno = vec![];
-        // for (i, mc) in mut_chances {
-        //         if mc < 1.0 - MUTATION_CHANCE {
-        //             return *candidate.genotype[i];
-        //         }
-
-        //         return get_random_move();
-
-        // }
         let mutated_geno = mut_chances
             .iter()
             .enumerate()
@@ -165,7 +148,7 @@ impl RHEA {
         return create_candidate(mutated_geno);
     }
 
-    fn crossover(&self, c1: &Canditate, c2: &Canditate) -> Vec<Canditate> {
+    fn crossover(&self, c1: &Individual, c2: &Individual) -> Vec<Individual> {
         // probably want this
         // to be fixed length array
         let mut rng = SmallRng::from_entropy();
@@ -174,7 +157,7 @@ impl RHEA {
 
         // check for cross over, return original candidates if not
         if m < 1.0 - self.crossover_chance {
-            vec![
+            return vec![
                 create_candidate(c1.genotype.clone()),
                 create_candidate(c2.genotype.clone()),
             ];
@@ -194,58 +177,18 @@ impl RHEA {
         ];
     }
 
-    fn select_parent<'a>(&self, rng: &mut SmallRng, pop: &'a Population) -> &'a Canditate {
+    fn select_parent<'a>(&self, rng: &mut SmallRng, pop: &'a Population) -> &'a Individual {
         let pop_length = self.pop.len();
         // randomly choose N candidates
-        let mut tournament: Vec<&Canditate> = (0..self.tournament_size)
+        let mut tournament: Vec<&Individual> = (0..self.tournament_size)
             .map(|_| pop.get(get_random_index(rng, pop_length)).unwrap())
             .collect();
 
         // Using an unstable sort to add some more randomness into the process
-        tournament.sort_unstable_by(|a, b| a.fitness.cmp(&b.fitness));
+        tournament.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
 
         // select the one with the best fitness
         return tournament.get(0).unwrap();
-    }
-
-    // fn maybe_fix_bad_moves(&self, c: &Canditate) -> Canditate {
-    //     let mut geno = c.genotype.clone();
-    //     for i in 0..GENO_LENGTH {
-    //         let first_move = geno[i];
-    //         if i + 1 >= GENO_LENGTH {
-    //             break;
-    //         }
-    //         let second_move = geno[i + 1];
-
-    //         if is_bad_move(first_move, second_move) {
-    //             let n = get_random_move();
-    //             geno[i + 1] = n
-    //         }
-    //     }
-
-    //     return create_candidate(geno);
-    // }
-}
-
-// returns true if the second argument is a bad move
-fn is_bad_move(m1: Direction, m2: Direction) -> bool {
-    match m1 {
-        Direction::Up => match m2 {
-            Direction::Down => true,
-            _ => false,
-        },
-        Direction::Down => match m2 {
-            Direction::Up => true,
-            _ => false,
-        },
-        Direction::Left => match m2 {
-            Direction::Right => true,
-            _ => false,
-        },
-        Direction::Right => match m2 {
-            Direction::Left => true,
-            _ => false,
-        },
     }
 }
 
@@ -255,7 +198,7 @@ pub fn score_population(g: &Game, pop: &mut Population, player: &String) {
     }
 }
 
-pub fn fitness(game: &Game, player: &String, c: &Canditate) -> i32 {
+pub fn fitness(game: &Game, player: &String, c: &Individual) -> i32 {
     let mut g = game.clone();
     let mut score = 0;
     for dir in &c.genotype {
@@ -291,14 +234,14 @@ pub fn score_game(g: &Game, player: &String) -> i32 {
     return score;
 }
 
-pub fn create_population(size: usize, geno_len: usize) -> Vec<Canditate> {
+pub fn create_population(size: usize, geno_len: usize) -> Vec<Individual> {
     return (0..size)
         .map(|_| create_candidate(get_random_moves(geno_len)))
         .collect();
 }
 
-fn create_candidate(genotype: Vec<Direction>) -> Canditate {
-    Canditate {
+fn create_candidate(genotype: Vec<Direction>) -> Individual {
+    Individual {
         genotype,
         fitness: 0,
     }
@@ -314,7 +257,6 @@ fn get_random_moves(n: usize) -> Vec<Direction> {
 
     return moves;
 }
-
 
 fn get_random_index(rng: &mut SmallRng, len: usize) -> usize {
     rng.gen_range(0..len).try_into().unwrap()
@@ -335,7 +277,7 @@ mod tests {
         let s2 = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
         let g2 = Game::create(vec![s2], vec![], 0, 11);
 
-        assert_eq!(g.empty, g2.empty);
+        assert_eq!(g.occupied, g2.occupied);
     }
 
     #[test]

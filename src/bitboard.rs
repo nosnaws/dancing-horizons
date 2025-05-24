@@ -14,10 +14,10 @@ use rand::{
 // 022 | 023 | 024 | 025 | 026 | 027 | 028 | 029 | 030 | 031 | 032
 // 011 | 012 | 013 | 014 | 015 | 016 | 017 | 018 | 019 | 020 | 021
 // 000 | 001 | 002 | 003 | 004 | 005 | 006 | 007 | 008 | 009 | 010
-type Board = u128;
+pub type Board = u128;
 
-const WIDTH: u128 = 11;
-const MAX_HEALTH: i32= 100;
+pub const WIDTH: u128 = 11;
+pub const MAX_HEALTH: i32 = 100;
 
 const LEFT_MASK: u128 = 
 0b0000000_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001_00000000001;
@@ -229,7 +229,7 @@ mod tests {
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.empty, !0);
+        assert_eq!(g.occupied, !0);
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.empty, !0);
+        assert_eq!(g.occupied, !0);
     }
 
     #[test]
@@ -255,7 +255,7 @@ mod tests {
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.empty, !0);
+        assert_eq!(g.occupied, !0);
     }
 
     #[test]
@@ -268,7 +268,7 @@ mod tests {
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.empty, !0);
+        assert_eq!(g.occupied, !0);
     }
 
     #[test]
@@ -394,7 +394,7 @@ mod tests {
 // TODO: Rename this to 'Board' to be in line with the api
 #[derive(Debug, Clone)]
 pub struct Game {
-    pub empty: Board,
+    pub occupied: Board,
     pub food: Board,
     pub snakes: Vec<Snake>,
     pub turn: usize,
@@ -406,11 +406,11 @@ pub type Move = (String, Direction);
 
 impl Game {
     pub fn create(snakes: Vec<Snake>, food: Vec<u128>, turn: usize, width: usize) -> Self {
-        let empty = { snakes.iter().fold(0, |a, s| a | s.body_board) };
+        let occupied = { snakes.iter().fold(0, |a, s| a | s.body_board) };
         let food = { food.iter().fold(0, |a, s| set_index(a, *s, 1)) };
 
         Self {
-            empty,
+            occupied,
             turn,
             food,
             width,
@@ -420,7 +420,7 @@ impl Game {
 
 
     pub fn advance_turn(&mut self, moves: Vec<Move>) {
-        let mut empty: u128 = !0;
+        let mut occupied: u128 = !0;
 
         let mut eliminated: Vec<String> = vec![];
         for snake in &mut self.snakes {
@@ -428,25 +428,39 @@ impl Game {
                 continue;
            } 
 
-            let s_move = moves.iter().find(|m| m.0 == snake.id).unwrap();
+            // Find the move for this snake, or determine a default move
+            let s_move = match moves.iter().find(|m| m.0 == snake.id) {
+                Some(m) => m.1,
+                None => {
+                    // If no move specified, continue in the same direction
+                    let head = snake.body[0];
+                    let neck = snake.body[1];
+                    let diff = head as i128 - neck as i128;
+                    
+                    match diff {
+                        d if d == 1 => Direction::Right,
+                        d if d == -1 => Direction::Left,
+                        d if d == self.width as i128 => Direction::Up,
+                        d if d == -(self.width as i128) => Direction::Down,
+                        _ => Direction::Up // Fallback if we can't determine direction
+                    }
+                }
+            };
+
             // check for out of bounds moves
-            if !is_dir_valid(&snake, &s_move.1) {
-                // println!("{} out of bounds!", snake.id);
+            if !is_dir_valid(&snake, &s_move) {
                 eliminated.push(snake.id.clone());
-                // snake.health = 0;
                 snake.move_tail();
                 continue;
             }
 
-             
             snake.move_tail();
-            snake.move_head(&s_move.1, WIDTH);
+            snake.move_head(&s_move, self.width.try_into().unwrap());
 
             snake.health -= 1;
 
-            empty = empty ^ snake.body_board ^ snake.head_board;
+            occupied = occupied ^ snake.body_board ^ snake.head_board;
         }
-
 
         let mut eaten_food: Vec<u128>= vec![];
         for snake in &mut self.snakes {
@@ -493,9 +507,9 @@ impl Game {
             }
 
             // If the snake had a head-to-head, then we know the check against
-            // `empty` will return greater than 0, so we skip the check.
-            if !had_h2h && snake.head_board & empty > 0 {
-                // println!("{:b}", empty);
+            // `occupied` will return greater than 0, so we skip the check.
+            if !had_h2h && snake.head_board & occupied > 0 {
+                // println!("{:b}", occupied);
                 // println!("{} collision!", snake.id);
                 eliminated.push(snake.id.clone());
             }
@@ -510,14 +524,14 @@ impl Game {
             }
         }
 
-        let mut new_empty: u128 = !0;
+        let mut new_occupied: u128 = !0;
         for snake in &self.snakes {
             if !snake.is_eliminated() {
-                new_empty = new_empty ^ snake.head_board ^ snake.body_board;
+                new_occupied = new_occupied ^ snake.head_board ^ snake.body_board;
             }
         }
 
-        self.empty = new_empty;
+        self.occupied = new_occupied;
         self.turn += 1;
     }
 
@@ -556,9 +570,51 @@ impl Game {
         
         return String::from("__");
     }
+
+    pub fn calculate_voronoi_scores(&self) -> std::collections::HashMap<String, i32> {
+        use std::collections::{HashMap, VecDeque};
+        
+        let mut scores: HashMap<String, i32> = HashMap::new();
+        let mut visited = 0u128;
+        let mut queue: VecDeque<(u128, &Snake)> = VecDeque::new();
+        
+        // Initialize queue with all snake heads
+        for snake in &self.snakes {
+            if !snake.is_eliminated() {
+                queue.push_back((snake.head(), snake));
+                visited |= snake.head_board;
+                scores.insert(snake.id.clone(), 0);
+            }
+        }
+        
+        // BFS from all snake heads simultaneously
+        while let Some((pos, snake)) = queue.pop_front() {
+            // Mark this cell as owned by this snake
+            scores.entry(snake.id.clone()).and_modify(|e| *e += 1);
+            
+            // Check all four directions
+            for dir in [Direction::Up, Direction::Down, Direction::Left, Direction::Right].iter() {
+                let next_pos = dir_to_index(pos, dir, self.width as u128);
+                
+                // Skip if position is invalid or already visited
+                if (next_pos >= (self.width * self.width) as u128) || // Out of bounds
+                   ((pos % self.width as u128 == 0) && *dir == Direction::Left) || // Left edge
+                   ((pos % self.width as u128 == (self.width - 1) as u128) && *dir == Direction::Right) || // Right edge
+                   (visited & (1 << next_pos) != 0) || // Already visited
+                   (self.occupied & (1 << next_pos) != 0) { // Occupied by snake body
+                    continue;
+                }
+                
+                visited |= 1 << next_pos;
+                queue.push_back((next_pos, snake));
+            }
+        }
+        
+        scores
+    }
 }
 
-fn is_dir_valid(snake: &Snake, dir: &Direction) -> bool {
+pub fn is_dir_valid(snake: &Snake, dir: &Direction) -> bool {
     let mask = match dir {
         Direction::Left => LEFT_MASK,
         Direction::Right => RIGHT_MASK,
@@ -569,12 +625,12 @@ fn is_dir_valid(snake: &Snake, dir: &Direction) -> bool {
     snake.head_board & mask == 0
 }
 
-fn set_index(board: Board, pos: u128, to: u128) -> u128 {
+pub fn set_index(board: Board, pos: u128, to: u128) -> u128 {
     let mask = 1 << pos;
     (board & !mask) | (to << pos)
 }
 
-fn dir_to_index(head: u128, dir: &Direction, width: u128) -> u128 {
+pub fn dir_to_index(head: u128, dir: &Direction, width: u128) -> u128 {
    match dir {
             Direction::Left => head - 1,
             Direction::Right => head + 1,
@@ -582,4 +638,3 @@ fn dir_to_index(head: u128, dir: &Direction, width: u128) -> u128 {
             Direction::Down => head - width,
     }
 }
-
