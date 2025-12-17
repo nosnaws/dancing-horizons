@@ -640,8 +640,65 @@ impl Negamax {
     }
 
     /// Evaluate the game state for the player
+    /// Uses voronoi for better board control assessment
     fn evaluate(&self, game: &Game, player: &String) -> i32 {
-        score_game(game, player)
+        let mut score = 0;
+        let mut snakes_alive = 0;
+        let mut player_snake: Option<&crate::bitboard::Snake> = None;
+        let mut max_opponent_length: usize = 0;
+
+        for snake in &game.snakes {
+            if snake.id == *player {
+                if snake.is_eliminated() {
+                    return -10000;
+                }
+                player_snake = Some(snake);
+            } else if !snake.is_eliminated() {
+                max_opponent_length = max_opponent_length.max(snake.length());
+            }
+
+            if !snake.is_eliminated() {
+                snakes_alive += 1;
+            }
+        }
+
+        if snakes_alive == 1 {
+            // We're the only one alive - big bonus
+            score += 5000;
+        }
+
+        if let Some(snake) = player_snake {
+            // Health bonus (0-50 points, scaled)
+            score += snake.health / 2;
+
+            // Length advantage over opponents (can be negative)
+            let length_diff = snake.length() as i32 - max_opponent_length as i32;
+            score += length_diff * 20;
+
+            // Voronoi board control - how much space we control
+            if snakes_alive > 1 {
+                let voronoi = game.calculate_voronoi_scores();
+                let player_control = voronoi.get(player).copied().unwrap_or(0);
+
+                // Calculate opponent's control
+                let opponent_control: i32 = voronoi.iter()
+                    .filter(|(id, _)| *id != player)
+                    .map(|(_, &v)| v)
+                    .sum();
+
+                // Reward controlling more space than opponents
+                let control_diff = player_control - opponent_control;
+                score += control_diff * 3; // Weight voronoi heavily
+            }
+
+            // Bonus for being near center (more escape routes)
+            let head = snake.body[0];
+            let center = 60u128;
+            let dist_to_center = manhattan_distance(head, center, game.width as u128);
+            score -= dist_to_center as i32;
+        }
+
+        score
     }
 }
 

@@ -591,20 +591,30 @@ impl Game {
         while let Some((pos, snake)) = queue.pop_front() {
             // Mark this cell as owned by this snake
             scores.entry(snake.id.clone()).and_modify(|e| *e += 1);
-            
+
             // Check all four directions
             for dir in [Direction::Up, Direction::Down, Direction::Left, Direction::Right].iter() {
-                let next_pos = dir_to_index(pos, dir, self.width as u128);
-                
-                // Skip if position is invalid or already visited
-                if (next_pos >= (self.width * self.width) as u128) || // Out of bounds
-                   ((pos % self.width as u128 == 0) && *dir == Direction::Left) || // Left edge
-                   ((pos % self.width as u128 == (self.width - 1) as u128) && *dir == Direction::Right) || // Right edge
-                   (visited & (1 << next_pos) != 0) || // Already visited
+                // Check boundary conditions BEFORE computing next_pos to avoid overflow
+                let width = self.width as u128;
+                let row = pos / width;
+                let col = pos % width;
+
+                // Skip if trying to go out of bounds
+                if (*dir == Direction::Left && col == 0) ||
+                   (*dir == Direction::Right && col == width - 1) ||
+                   (*dir == Direction::Down && row == 0) ||
+                   (*dir == Direction::Up && row == width - 1) {
+                    continue;
+                }
+
+                let next_pos = dir_to_index(pos, dir, width);
+
+                // Skip if already visited or occupied
+                if (visited & (1 << next_pos) != 0) || // Already visited
                    (self.occupied & (1 << next_pos) != 0) { // Occupied by snake body
                     continue;
                 }
-                
+
                 visited |= 1 << next_pos;
                 queue.push_back((next_pos, snake));
             }
