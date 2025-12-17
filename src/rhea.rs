@@ -200,10 +200,28 @@ pub fn score_population(g: &Game, pop: &mut Population, player: &String) {
 }
 
 pub fn fitness(game: &Game, player: &String, c: &Individual) -> i32 {
+    fitness_with_opponent_modeling(game, player, c, true)
+}
+
+pub fn fitness_with_opponent_modeling(game: &Game, player: &String, c: &Individual, random_opponents: bool) -> i32 {
     let mut g = game.clone();
     let mut score = 0;
+    let mut rng = SmallRng::from_entropy();
+
     for dir in &c.genotype {
-        g.advance_turn(vec![(player.clone(), dir.clone())]);
+        let mut moves: Vec<(String, Direction)> = vec![(player.clone(), dir.clone())];
+
+        if random_opponents {
+            // Generate random moves for all opponents
+            for snake in &g.snakes {
+                if snake.id != *player && !snake.is_eliminated() {
+                    let opponent_move: Direction = rng.gen();
+                    moves.push((snake.id.clone(), opponent_move));
+                }
+            }
+        }
+
+        g.advance_turn(moves);
         score += score_game(&g, &player);
     }
 
@@ -284,18 +302,18 @@ mod tests {
     #[test]
     fn mutates() {
         use rand::SeedableRng;
-        
+
         let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
         let g = Game::create(vec![s], vec![], 0, 11);
         let c = create_population(1, 3);
         let geno_copy = c[0].genotype.clone();
         let _r = RHEA::create(g, String::from("test"));
-        
+
         // Use a fixed seed that produces no mutations (values > 0.7)
         let mut rng = SmallRng::seed_from_u64(42);
         let mut mut_chances = [0f32; GENO_LENGTH];
         rng.fill(&mut mut_chances);
-        
+
         let mutated_geno = mut_chances
             .iter()
             .take(c[0].genotype.len())
@@ -307,8 +325,108 @@ mod tests {
                 return rng.gen();
             })
             .collect();
-            
+
         let cm = create_candidate(mutated_geno);
         assert_eq!(cm.genotype, geno_copy);
+    }
+
+    /// Simulates a head-to-head game where:
+    /// - Player 1 uses random opponent modeling
+    /// - Player 2 uses default (continue straight) opponent modeling
+    /// Returns: (player1_won, player2_won, draw)
+    fn simulate_head_to_head(max_turns: usize) -> (bool, bool, bool) {
+        use rand::SeedableRng;
+        let mut rng = SmallRng::from_entropy();
+
+        // Create two snakes - closer together to encourage conflict
+        let s1 = Snake::create(String::from("player1"), 100, vec![23, 12, 1]);
+        let s2 = Snake::create(String::from("player2"), 100, vec![97, 108, 119]);
+
+        // Add food in the middle to encourage conflict
+        let food = vec![60, 59, 61, 49, 71, 48, 72, 37, 83];
+        let mut game = Game::create(vec![s1, s2], food, 0, 11);
+
+        for _ in 0..max_turns {
+            let mut moves: Vec<(String, Direction)> = vec![];
+
+            for snake in &game.snakes {
+                if snake.is_eliminated() {
+                    continue;
+                }
+
+                // Player 1 uses random opponent modeling, Player 2 uses default
+                let use_random = snake.id == "player1";
+
+                let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+                let mut best_dir = directions[rng.gen_range(0..4)];
+                let mut best_score = i32::MIN;
+
+                for dir in &directions {
+                    let candidate = create_candidate(vec![*dir; 5]);
+                    let score = fitness_with_opponent_modeling(&game, &snake.id, &candidate, use_random);
+                    if score > best_score {
+                        best_score = score;
+                        best_dir = *dir;
+                    }
+                }
+
+                moves.push((snake.id.clone(), best_dir));
+            }
+
+            game.advance_turn(moves);
+
+            // Check for game end
+            let alive: Vec<_> = game.snakes.iter().filter(|s| !s.is_eliminated()).collect();
+            if alive.len() <= 1 {
+                break;
+            }
+        }
+
+        let p1_alive = !game.snakes.iter().find(|s| s.id == "player1").unwrap().is_eliminated();
+        let p2_alive = !game.snakes.iter().find(|s| s.id == "player2").unwrap().is_eliminated();
+
+        match (p1_alive, p2_alive) {
+            (true, false) => (true, false, false),
+            (false, true) => (false, true, false),
+            (true, true) => (false, false, true),   // Draw (timeout)
+            (false, false) => (false, false, true), // Both died simultaneously
+        }
+    }
+
+    #[test]
+    fn compare_opponent_modeling_strategies() {
+        const NUM_GAMES: usize = 50;
+        const MAX_TURNS: usize = 500;
+
+        println!("\n=== Head-to-Head: Random vs Default Opponent Modeling ===\n");
+        println!("Player 1 (P1): Uses RANDOM opponent modeling");
+        println!("Player 2 (P2): Uses DEFAULT (continue straight) opponent modeling\n");
+
+        let mut p1_wins = 0;
+        let mut p2_wins = 0;
+        let mut draws = 0;
+
+        for i in 0..NUM_GAMES {
+            let (p1_won, p2_won, draw) = simulate_head_to_head(MAX_TURNS);
+            if p1_won { p1_wins += 1; }
+            if p2_won { p2_wins += 1; }
+            if draw { draws += 1; }
+
+            let result = if p1_won { "P1 (random)" } else if p2_won { "P2 (default)" } else { "Draw" };
+            println!("Game {:2}: {}", i + 1, result);
+        }
+
+        println!("\n=== Results Summary ===");
+        println!("P1 (random modeling) wins:  {} ({:.1}%)", p1_wins, (p1_wins as f64 / NUM_GAMES as f64) * 100.0);
+        println!("P2 (default modeling) wins: {} ({:.1}%)", p2_wins, (p2_wins as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:                      {} ({:.1}%)", draws, (draws as f64 / NUM_GAMES as f64) * 100.0);
+
+        if p1_wins > p2_wins {
+            println!("\nConclusion: Random opponent modeling appears BETTER");
+        } else if p2_wins > p1_wins {
+            println!("\nConclusion: Default opponent modeling appears BETTER");
+        } else {
+            println!("\nConclusion: No clear winner - strategies appear equal");
+        }
     }
 }
