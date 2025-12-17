@@ -440,65 +440,103 @@ impl Negamax {
         Self { max_depth }
     }
 
-    /// Get the best move for a player using minimax search with alpha-beta pruning
-    /// Note: For simultaneous move games, we use a max search from player's perspective
-    /// with opponent moves predicted using deterministic smart heuristics
+    /// Get the best move using minimax for simultaneous move games
+    /// For each of our moves, we find the opponent's best counter-move,
+    /// then pick the move that gives us the best outcome assuming optimal opponent play
     pub fn get_best_move(&self, game: &Game, player: &String) -> Direction {
         use crate::bitboard::is_dir_valid;
 
         let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
 
-        // Find the player's snake
+        // Find player and opponent snakes
         let player_snake = game.snakes.iter().find(|s| s.id == *player);
         if player_snake.is_none() {
             return Direction::Up;
         }
         let player_snake = player_snake.unwrap();
 
-        // Filter valid moves
-        let valid_moves: Vec<Direction> = directions
+        let opponent = game.snakes.iter()
+            .find(|s| s.id != *player && !s.is_eliminated());
+
+        // Filter valid moves for player
+        let player_moves: Vec<Direction> = directions
             .iter()
             .filter(|dir| is_dir_valid(player_snake, dir))
             .cloned()
             .collect();
 
-        if valid_moves.is_empty() {
+        if player_moves.is_empty() {
             return Direction::Up;
         }
 
-        let mut best_move = valid_moves[0];
+        // If no opponent, just maximize our score
+        if opponent.is_none() {
+            let mut best_move = player_moves[0];
+            let mut best_score = i32::MIN;
+            for dir in &player_moves {
+                let mut game_clone = game.clone();
+                game_clone.advance_turn(vec![(player.clone(), *dir)]);
+                let score = self.negamax(&game_clone, player, self.max_depth - 1, i32::MIN + 1, i32::MAX);
+                if score > best_score {
+                    best_score = score;
+                    best_move = *dir;
+                }
+            }
+            return best_move;
+        }
+
+        let opponent = opponent.unwrap();
+        let opponent_id = opponent.id.clone();
+
+        // Get opponent's valid moves
+        let opponent_moves: Vec<Direction> = directions
+            .iter()
+            .filter(|dir| is_dir_valid(opponent, dir))
+            .cloned()
+            .collect();
+
+        let mut best_move = player_moves[0];
         let mut best_score = i32::MIN;
 
-        for dir in &valid_moves {
-            let mut game_clone = game.clone();
+        // For each of our moves, find the worst-case (opponent's best response)
+        for player_dir in &player_moves {
+            let mut worst_score = i32::MAX; // Opponent will minimize our score
 
-            // Generate opponent moves using deterministic smart heuristic
-            let mut moves = vec![(player.clone(), *dir)];
-            for snake in &game.snakes {
-                if snake.id != *player && !snake.is_eliminated() {
-                    if let Some(opp_move) = get_smart_move_deterministic(&game_clone, snake) {
-                        moves.push((snake.id.clone(), opp_move));
-                    }
+            if opponent_moves.is_empty() {
+                // Opponent has no moves, just evaluate our move
+                let mut game_clone = game.clone();
+                game_clone.advance_turn(vec![(player.clone(), *player_dir)]);
+                worst_score = self.negamax(&game_clone, player, self.max_depth - 1, i32::MIN + 1, i32::MAX);
+            } else {
+                // Find opponent's best response (worst for us)
+                for opp_dir in &opponent_moves {
+                    let mut game_clone = game.clone();
+                    game_clone.advance_turn(vec![
+                        (player.clone(), *player_dir),
+                        (opponent_id.clone(), *opp_dir),
+                    ]);
+
+                    let score = self.negamax(&game_clone, player, self.max_depth - 1, i32::MIN + 1, i32::MAX);
+                    worst_score = worst_score.min(score); // Opponent picks worst for us
                 }
             }
 
-            game_clone.advance_turn(moves);
-
-            let score = self.alpha_beta_max(&game_clone, player, self.max_depth - 1, i32::MIN + 1, i32::MAX);
-
-            if score > best_score {
-                best_score = score;
-                best_move = *dir;
+            // We pick the move with the best worst-case outcome
+            if worst_score > best_score {
+                best_score = worst_score;
+                best_move = *player_dir;
             }
         }
 
         best_move
     }
 
-    /// Alpha-beta search maximizing for the player
-    /// Since Battlesnake has simultaneous moves, we always evaluate from player's perspective
-    fn alpha_beta_max(&self, game: &Game, player: &String, depth: usize, mut alpha: i32, beta: i32) -> i32 {
+    /// Negamax search - alternates between maximizing and minimizing
+    /// For simultaneous games: at each level we do max-min over joint actions
+    fn negamax(&self, game: &Game, player: &String, depth: usize, mut alpha: i32, beta: i32) -> i32 {
         use crate::bitboard::is_dir_valid;
+
+        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
 
         // Terminal conditions
         let player_snake = game.snakes.iter().find(|s| s.id == *player);
@@ -520,43 +558,79 @@ impl Negamax {
         }
 
         let player_snake = player_snake.unwrap();
-        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
 
-        // Filter valid moves
-        let valid_moves: Vec<Direction> = directions
+        // Get opponent
+        let opponent = game.snakes.iter()
+            .find(|s| s.id != *player && !s.is_eliminated());
+
+        // Filter valid moves for player
+        let player_moves: Vec<Direction> = directions
             .iter()
             .filter(|dir| is_dir_valid(player_snake, dir))
             .cloned()
             .collect();
 
-        if valid_moves.is_empty() {
+        if player_moves.is_empty() {
             return -10000 + (self.max_depth - depth) as i32;
         }
 
+        // If no opponent, just maximize
+        if opponent.is_none() {
+            let mut best_score = i32::MIN + 1;
+            for dir in &player_moves {
+                let mut game_clone = game.clone();
+                game_clone.advance_turn(vec![(player.clone(), *dir)]);
+                let score = self.negamax(&game_clone, player, depth - 1, alpha, beta);
+                best_score = best_score.max(score);
+                alpha = alpha.max(score);
+                if alpha >= beta {
+                    break;
+                }
+            }
+            return best_score;
+        }
+
+        let opponent = opponent.unwrap();
+        let opponent_id = opponent.id.clone();
+
+        let opponent_moves: Vec<Direction> = directions
+            .iter()
+            .filter(|dir| is_dir_valid(opponent, dir))
+            .cloned()
+            .collect();
+
         let mut best_score = i32::MIN + 1;
 
-        for dir in &valid_moves {
-            let mut game_clone = game.clone();
+        // Max over our moves, min over opponent moves
+        for player_dir in &player_moves {
+            let mut worst_score = i32::MAX;
 
-            // Generate opponent moves using deterministic smart heuristic
-            let mut moves = vec![(player.clone(), *dir)];
-            for snake in &game.snakes {
-                if snake.id != *player && !snake.is_eliminated() {
-                    if let Some(opp_move) = get_smart_move_deterministic(&game_clone, snake) {
-                        moves.push((snake.id.clone(), opp_move));
+            if opponent_moves.is_empty() {
+                let mut game_clone = game.clone();
+                game_clone.advance_turn(vec![(player.clone(), *player_dir)]);
+                worst_score = self.negamax(&game_clone, player, depth - 1, alpha, beta);
+            } else {
+                for opp_dir in &opponent_moves {
+                    let mut game_clone = game.clone();
+                    game_clone.advance_turn(vec![
+                        (player.clone(), *player_dir),
+                        (opponent_id.clone(), *opp_dir),
+                    ]);
+
+                    let score = self.negamax(&game_clone, player, depth - 1, alpha, beta);
+                    worst_score = worst_score.min(score);
+
+                    // Beta cutoff for the min level
+                    if worst_score <= alpha {
+                        break;
                     }
                 }
             }
 
-            game_clone.advance_turn(moves);
+            best_score = best_score.max(worst_score);
+            alpha = alpha.max(best_score);
 
-            // Recurse - continue maximizing from player's perspective
-            let score = self.alpha_beta_max(&game_clone, player, depth - 1, alpha, beta);
-
-            best_score = best_score.max(score);
-            alpha = alpha.max(score);
-
-            // Alpha-beta cutoff
+            // Alpha cutoff for the max level
             if alpha >= beta {
                 break;
             }
@@ -784,7 +858,8 @@ mod tests {
         let mut game = Game::create(vec![s1, s2], food, 0, 11);
 
         // Create negamax instances if needed
-        let negamax = Negamax::new(8); // Depth 8 for deeper search
+        // Depth 4 because branching is now 4x4=16 per level (proper minimax over joint actions)
+        let negamax = Negamax::new(4);
 
         for _ in 0..max_turns {
             let mut moves: Vec<(String, Direction)> = vec![];
@@ -860,7 +935,7 @@ mod tests {
         const MAX_TURNS: usize = 500;
 
         println!("\n=== Negamax vs RHEA Tournament ===\n");
-        println!("Negamax depth: 8");
+        println!("Negamax depth: 4 (proper minimax over joint actions)");
         println!("RHEA: Smart opponent modeling, 5-move lookahead");
         println!("Each matchup: {} games, max {} turns\n", NUM_GAMES, MAX_TURNS);
 
