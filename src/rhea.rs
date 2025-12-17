@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn compare_opponent_modeling_strategies() {
         const NUM_GAMES: usize = 50;
-        const MAX_TURNS: usize = 150; // Shorter games = more decisive outcomes
+        const MAX_TURNS: usize = 500; // Run games to conclusion
 
         println!("\n=== Opponent Modeling Tournament ===\n");
         println!("Each matchup: {} games, max {} turns\n", NUM_GAMES, MAX_TURNS);
