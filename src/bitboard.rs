@@ -524,10 +524,11 @@ impl Game {
             }
         }
 
-        let mut new_occupied: u128 = !0;
+        // Recompute occupied: bit=1 means snake body is present
+        let mut new_occupied: u128 = 0;
         for snake in &self.snakes {
             if !snake.is_eliminated() {
-                new_occupied = new_occupied ^ snake.head_board ^ snake.body_board;
+                new_occupied = new_occupied | snake.head_board | snake.body_board;
             }
         }
 

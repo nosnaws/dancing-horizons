@@ -1035,4 +1035,70 @@ mod tests {
             println!("\nTIE");
         }
     }
+
+    #[test]
+    fn debug_voronoi_values() {
+        use rand::SeedableRng;
+        let mut rng = SmallRng::seed_from_u64(12345);
+
+        // Fixed starting position
+        let s1 = Snake::create(String::from("player1"), 100, vec![23, 12, 1]);
+        let s2 = Snake::create(String::from("player2"), 100, vec![97, 108, 119]);
+
+        let food = vec![60, 49, 71];
+        let mut game = Game::create(vec![s1, s2], food, 0, 11);
+
+        let negamax = Negamax::new(4);
+
+        println!("\n=== Voronoi Debug ===\n");
+
+        for turn in 0..20 {
+            let voronoi = game.calculate_voronoi_scores();
+            let p1_control = voronoi.get(&String::from("player1")).copied().unwrap_or(0);
+            let p2_control = voronoi.get(&String::from("player2")).copied().unwrap_or(0);
+
+            let p1_snake = game.snakes.iter().find(|s| s.id == "player1").unwrap();
+            let p2_snake = game.snakes.iter().find(|s| s.id == "player2").unwrap();
+
+            println!(
+                "Turn {}: P1 head={}, control={} | P2 head={}, control={} | diff={}",
+                turn,
+                p1_snake.body[0],
+                p1_control,
+                p2_snake.body[0],
+                p2_control,
+                p1_control - p2_control
+            );
+
+            // Get Negamax evaluation for player1
+            let eval = negamax.evaluate(&game, &String::from("player1"));
+            println!("  Negamax eval for P1: {}", eval);
+
+            let mut moves: Vec<(String, Direction)> = vec![];
+
+            for snake in &game.snakes {
+                if snake.is_eliminated() {
+                    continue;
+                }
+
+                let best_dir = negamax.get_best_move(&game, &snake.id);
+                moves.push((snake.id.clone(), best_dir));
+            }
+
+            println!("  Moves: {:?}", moves);
+
+            game.advance_turn(moves);
+
+            let alive: Vec<_> = game.snakes.iter().filter(|s| !s.is_eliminated()).collect();
+            if alive.len() <= 1 {
+                println!("\nGame ended at turn {}", turn);
+                break;
+            }
+        }
+
+        // Final state
+        let p1_alive = !game.snakes.iter().find(|s| s.id == "player1").unwrap().is_eliminated();
+        let p2_alive = !game.snakes.iter().find(|s| s.id == "player2").unwrap().is_eliminated();
+        println!("\nFinal: P1 alive={}, P2 alive={}", p1_alive, p2_alive);
+    }
 }
