@@ -199,11 +199,22 @@ pub fn score_population(g: &Game, pop: &mut Population, player: &String) {
     }
 }
 
-pub fn fitness(game: &Game, player: &String, c: &Individual) -> i32 {
-    fitness_with_opponent_modeling(game, player, c, true)
+/// Opponent modeling strategies
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OpponentModel {
+    /// No opponent moves provided - uses default "continue straight" behavior
+    Default,
+    /// Random moves for opponents
+    Random,
+    /// Smart opponents that seek food and avoid collisions
+    Smart,
 }
 
-pub fn fitness_with_opponent_modeling(game: &Game, player: &String, c: &Individual, random_opponents: bool) -> i32 {
+pub fn fitness(game: &Game, player: &String, c: &Individual) -> i32 {
+    fitness_with_opponent_modeling(game, player, c, OpponentModel::Smart)
+}
+
+pub fn fitness_with_opponent_modeling(game: &Game, player: &String, c: &Individual, opponent_model: OpponentModel) -> i32 {
     let mut g = game.clone();
     let mut score = 0;
     let mut rng = SmallRng::from_entropy();
@@ -211,12 +222,24 @@ pub fn fitness_with_opponent_modeling(game: &Game, player: &String, c: &Individu
     for dir in &c.genotype {
         let mut moves: Vec<(String, Direction)> = vec![(player.clone(), dir.clone())];
 
-        if random_opponents {
-            // Generate random moves for all opponents
-            for snake in &g.snakes {
-                if snake.id != *player && !snake.is_eliminated() {
-                    let opponent_move: Direction = rng.gen();
-                    moves.push((snake.id.clone(), opponent_move));
+        match opponent_model {
+            OpponentModel::Default => {
+                // Don't add opponent moves - let bitboard use default behavior
+            }
+            OpponentModel::Random => {
+                for snake in &g.snakes {
+                    if snake.id != *player && !snake.is_eliminated() {
+                        let opponent_move: Direction = rng.gen();
+                        moves.push((snake.id.clone(), opponent_move));
+                    }
+                }
+            }
+            OpponentModel::Smart => {
+                for snake in &g.snakes {
+                    if snake.id != *player && !snake.is_eliminated() {
+                        let opponent_move = get_smart_move(&g, snake, &mut rng);
+                        moves.push((snake.id.clone(), opponent_move));
+                    }
                 }
             }
         }
@@ -228,16 +251,114 @@ pub fn fitness_with_opponent_modeling(game: &Game, player: &String, c: &Individu
     return score;
 }
 
+/// Generate a smart move for an opponent snake:
+/// 1. Avoid immediate death (walls, self-collision)
+/// 2. Seek nearby food if health is low
+/// 3. Otherwise move toward center or open space
+fn get_smart_move(game: &Game, snake: &crate::bitboard::Snake, rng: &mut SmallRng) -> Direction {
+    use crate::bitboard::{is_dir_valid, dir_to_index};
+
+    let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let head = snake.body[0];
+    let width = game.width as u128;
+
+    // Filter to only valid moves (not into walls)
+    let valid_moves: Vec<Direction> = directions
+        .iter()
+        .filter(|dir| is_dir_valid(snake, dir))
+        .cloned()
+        .collect();
+
+    if valid_moves.is_empty() {
+        // No valid moves, just return something
+        return directions[rng.gen_range(0..4)];
+    }
+
+    // Score each valid move
+    let mut best_move = valid_moves[0];
+    let mut best_score = i32::MIN;
+
+    for dir in &valid_moves {
+        let new_pos = dir_to_index(head, dir, width);
+        let pos_bit = 1u128 << new_pos;
+        let mut move_score: i32 = 0;
+
+        // Heavily penalize moving into occupied space (body collision)
+        // But exclude the tail position since it will move
+        let tail = *snake.body.last().unwrap();
+        let tail_bit = 1u128 << tail;
+        let occupied_without_tail = game.occupied & !tail_bit;
+
+        if pos_bit & occupied_without_tail != 0 {
+            move_score -= 1000;
+        }
+
+        // Avoid moving back into own neck
+        if snake.body.len() > 1 {
+            let neck = snake.body[1];
+            if new_pos == neck {
+                move_score -= 1000;
+            }
+        }
+
+        // Bonus for moving toward food (especially if health is low)
+        if game.food != 0 {
+            let food_bonus = if snake.health < 30 { 50 } else { 10 };
+            // Check if this move gets us closer to any food
+            if pos_bit & game.food != 0 {
+                move_score += food_bonus * 5; // Direct food pickup
+            } else {
+                // Simple heuristic: prefer moves that reduce manhattan distance to food
+                // For simplicity, just give bonus for moving toward center if food exists
+                let center = 60u128; // Center of 11x11 board
+                let current_dist = manhattan_distance(head, center, width);
+                let new_dist = manhattan_distance(new_pos, center, width);
+                if new_dist < current_dist {
+                    move_score += food_bonus;
+                }
+            }
+        }
+
+        // Small bonus for staying toward center (more options)
+        let center = 60u128;
+        let dist_to_center = manhattan_distance(new_pos, center, width);
+        move_score -= dist_to_center as i32;
+
+        if move_score > best_score {
+            best_score = move_score;
+            best_move = *dir;
+        }
+    }
+
+    best_move
+}
+
+fn manhattan_distance(pos1: u128, pos2: u128, width: u128) -> u128 {
+    let x1 = pos1 % width;
+    let y1 = pos1 / width;
+    let x2 = pos2 % width;
+    let y2 = pos2 / width;
+
+    let dx = if x1 > x2 { x1 - x2 } else { x2 - x1 };
+    let dy = if y1 > y2 { y1 - y2 } else { y2 - y1 };
+
+    dx + dy
+}
+
 pub fn score_game(g: &Game, player: &String) -> i32 {
     let mut score = 0;
     let mut snakes_alive = 0;
+    let mut player_snake: Option<&crate::bitboard::Snake> = None;
+    let mut max_opponent_length: usize = 0;
 
     for snake in &g.snakes {
         if snake.id == *player {
             if snake.is_eliminated() {
                 return -1000;
             }
-            // score += snake.health;
+            player_snake = Some(snake);
+        } else if !snake.is_eliminated() {
+            max_opponent_length = max_opponent_length.max(snake.length());
         }
 
         if !snake.is_eliminated() {
@@ -246,11 +367,26 @@ pub fn score_game(g: &Game, player: &String) -> i32 {
     }
 
     if snakes_alive == 1 {
-        // we're the only ones alive now
-        score += 100;
+        // We're the only one alive - big bonus
+        score += 500;
     }
 
-    return score;
+    if let Some(snake) = player_snake {
+        // Health bonus (0-50 points, scaled)
+        score += snake.health / 2;
+
+        // Length advantage over opponents (can be negative)
+        let length_diff = snake.length() as i32 - max_opponent_length as i32;
+        score += length_diff * 10;
+
+        // Bonus for being near center (more escape routes)
+        let head = snake.body[0];
+        let center = 60u128;
+        let dist_to_center = manhattan_distance(head, center, g.width as u128);
+        score -= dist_to_center as i32; // Penalize being far from center
+    }
+
+    score
 }
 
 pub fn create_population(size: usize, geno_len: usize) -> Vec<Individual> {
@@ -330,20 +466,26 @@ mod tests {
         assert_eq!(cm.genotype, geno_copy);
     }
 
-    /// Simulates a head-to-head game where:
-    /// - Player 1 uses random opponent modeling
-    /// - Player 2 uses default (continue straight) opponent modeling
+    /// Simulates a head-to-head game between two opponent modeling strategies
     /// Returns: (player1_won, player2_won, draw)
-    fn simulate_head_to_head(max_turns: usize) -> (bool, bool, bool) {
+    fn simulate_head_to_head(p1_model: OpponentModel, p2_model: OpponentModel, max_turns: usize) -> (bool, bool, bool) {
         use rand::SeedableRng;
         let mut rng = SmallRng::from_entropy();
 
-        // Create two snakes - closer together to encourage conflict
-        let s1 = Snake::create(String::from("player1"), 100, vec![23, 12, 1]);
-        let s2 = Snake::create(String::from("player2"), 100, vec![97, 108, 119]);
+        // Randomize starting positions to avoid bias
+        let positions: [(Vec<u128>, Vec<u128>); 4] = [
+            (vec![23, 12, 1], vec![97, 108, 119]),     // Corners
+            (vec![55, 44, 33], vec![65, 76, 87]),      // Near center
+            (vec![5, 4, 3], vec![115, 116, 117]),      // Bottom vs top
+            (vec![33, 22, 11], vec![87, 98, 109]),     // Diagonal
+        ];
+        let (p1_pos, p2_pos) = positions[rng.gen_range(0..positions.len())].clone();
 
-        // Add food in the middle to encourage conflict
-        let food = vec![60, 59, 61, 49, 71, 48, 72, 37, 83];
+        let s1 = Snake::create(String::from("player1"), 100, p1_pos);
+        let s2 = Snake::create(String::from("player2"), 100, p2_pos);
+
+        // Limited food to force competition
+        let food = vec![60, 49, 71];
         let mut game = Game::create(vec![s1, s2], food, 0, 11);
 
         for _ in 0..max_turns {
@@ -354,8 +496,7 @@ mod tests {
                     continue;
                 }
 
-                // Player 1 uses random opponent modeling, Player 2 uses default
-                let use_random = snake.id == "player1";
+                let model = if snake.id == "player1" { p1_model } else { p2_model };
 
                 let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
                 let mut best_dir = directions[rng.gen_range(0..4)];
@@ -363,7 +504,7 @@ mod tests {
 
                 for dir in &directions {
                     let candidate = create_candidate(vec![*dir; 5]);
-                    let score = fitness_with_opponent_modeling(&game, &snake.id, &candidate, use_random);
+                    let score = fitness_with_opponent_modeling(&game, &snake.id, &candidate, model);
                     if score > best_score {
                         best_score = score;
                         best_dir = *dir;
@@ -393,40 +534,68 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compare_opponent_modeling_strategies() {
-        const NUM_GAMES: usize = 50;
-        const MAX_TURNS: usize = 500;
-
-        println!("\n=== Head-to-Head: Random vs Default Opponent Modeling ===\n");
-        println!("Player 1 (P1): Uses RANDOM opponent modeling");
-        println!("Player 2 (P2): Uses DEFAULT (continue straight) opponent modeling\n");
-
+    fn run_matchup(p1_model: OpponentModel, p2_model: OpponentModel, num_games: usize, max_turns: usize) -> (usize, usize, usize) {
         let mut p1_wins = 0;
         let mut p2_wins = 0;
         let mut draws = 0;
 
-        for i in 0..NUM_GAMES {
-            let (p1_won, p2_won, draw) = simulate_head_to_head(MAX_TURNS);
+        for _ in 0..num_games {
+            let (p1_won, p2_won, draw) = simulate_head_to_head(p1_model, p2_model, max_turns);
             if p1_won { p1_wins += 1; }
             if p2_won { p2_wins += 1; }
             if draw { draws += 1; }
-
-            let result = if p1_won { "P1 (random)" } else if p2_won { "P2 (default)" } else { "Draw" };
-            println!("Game {:2}: {}", i + 1, result);
         }
 
-        println!("\n=== Results Summary ===");
-        println!("P1 (random modeling) wins:  {} ({:.1}%)", p1_wins, (p1_wins as f64 / NUM_GAMES as f64) * 100.0);
-        println!("P2 (default modeling) wins: {} ({:.1}%)", p2_wins, (p2_wins as f64 / NUM_GAMES as f64) * 100.0);
-        println!("Draws:                      {} ({:.1}%)", draws, (draws as f64 / NUM_GAMES as f64) * 100.0);
+        (p1_wins, p2_wins, draws)
+    }
 
-        if p1_wins > p2_wins {
-            println!("\nConclusion: Random opponent modeling appears BETTER");
-        } else if p2_wins > p1_wins {
-            println!("\nConclusion: Default opponent modeling appears BETTER");
+    #[test]
+    fn compare_opponent_modeling_strategies() {
+        const NUM_GAMES: usize = 50;
+        const MAX_TURNS: usize = 150; // Shorter games = more decisive outcomes
+
+        println!("\n=== Opponent Modeling Tournament ===\n");
+        println!("Each matchup: {} games, max {} turns\n", NUM_GAMES, MAX_TURNS);
+
+        // Smart vs Default
+        println!("--- SMART vs DEFAULT ---");
+        let (smart_w, default_w, draws) = run_matchup(OpponentModel::Smart, OpponentModel::Default, NUM_GAMES, MAX_TURNS);
+        println!("Smart wins:   {} ({:.1}%)", smart_w, (smart_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Default wins: {} ({:.1}%)", default_w, (default_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:        {} ({:.1}%)\n", draws, (draws as f64 / NUM_GAMES as f64) * 100.0);
+
+        // Smart vs Random
+        println!("--- SMART vs RANDOM ---");
+        let (smart_w2, random_w, draws2) = run_matchup(OpponentModel::Smart, OpponentModel::Random, NUM_GAMES, MAX_TURNS);
+        println!("Smart wins:  {} ({:.1}%)", smart_w2, (smart_w2 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Random wins: {} ({:.1}%)", random_w, (random_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:       {} ({:.1}%)\n", draws2, (draws2 as f64 / NUM_GAMES as f64) * 100.0);
+
+        // Random vs Default
+        println!("--- RANDOM vs DEFAULT ---");
+        let (random_w2, default_w2, draws3) = run_matchup(OpponentModel::Random, OpponentModel::Default, NUM_GAMES, MAX_TURNS);
+        println!("Random wins:  {} ({:.1}%)", random_w2, (random_w2 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Default wins: {} ({:.1}%)", default_w2, (default_w2 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:        {} ({:.1}%)\n", draws3, (draws3 as f64 / NUM_GAMES as f64) * 100.0);
+
+        // Summary
+        println!("=== OVERALL RANKING ===");
+        let smart_total = smart_w + smart_w2;
+        let random_total = random_w + random_w2;
+        let default_total = default_w + default_w2;
+
+        println!("Smart:   {} wins across matchups", smart_total);
+        println!("Random:  {} wins across matchups", random_total);
+        println!("Default: {} wins across matchups", default_total);
+
+        if smart_total > random_total && smart_total > default_total {
+            println!("\nBEST STRATEGY: Smart opponent modeling");
+        } else if random_total > smart_total && random_total > default_total {
+            println!("\nBEST STRATEGY: Random opponent modeling");
+        } else if default_total > smart_total && default_total > random_total {
+            println!("\nBEST STRATEGY: Default opponent modeling");
         } else {
-            println!("\nConclusion: No clear winner - strategies appear equal");
+            println!("\nNo clear winner");
         }
     }
 }
