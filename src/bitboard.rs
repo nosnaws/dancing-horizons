@@ -1,5 +1,6 @@
 use rand::{
     distributions::{Distribution, Standard},
+    seq::SliceRandom,
     Rng,
 };
 // BOARD
@@ -399,6 +400,9 @@ pub struct Game {
     pub snakes: Vec<Snake>,
     pub turn: usize,
     pub width: usize,
+    // Food spawning settings (optional, following Battlesnake rules)
+    pub food_spawn_chance: u8,  // Percentage (0-100), default 15
+    pub minimum_food: usize,    // Default 1
 }
 
 
@@ -406,6 +410,24 @@ pub type Move = (String, Direction);
 
 impl Game {
     pub fn create(snakes: Vec<Snake>, food: Vec<u128>, turn: usize, width: usize) -> Self {
+        Self::create_with_spawning(
+            snakes,
+            food,
+            turn,
+            width,
+            DEFAULT_FOOD_SPAWN_CHANCE,
+            DEFAULT_MINIMUM_FOOD,
+        )
+    }
+
+    pub fn create_with_spawning(
+        snakes: Vec<Snake>,
+        food: Vec<u128>,
+        turn: usize,
+        width: usize,
+        food_spawn_chance: u8,
+        minimum_food: usize,
+    ) -> Self {
         let occupied = { snakes.iter().fold(0, |a, s| a | s.body_board) };
         let food = { food.iter().fold(0, |a, s| set_index(a, *s, 1)) };
 
@@ -415,7 +437,84 @@ impl Game {
             food,
             width,
             snakes,
+            food_spawn_chance,
+            minimum_food,
         }
+    }
+
+    /// Counts the number of food items currently on the board.
+    pub fn count_food(&self) -> usize {
+        self.food.count_ones() as usize
+    }
+
+    /// Returns a vector of all unoccupied cell indices.
+    /// A cell is unoccupied if it's not part of any snake body and doesn't have food.
+    fn get_unoccupied_points(&self) -> Vec<u128> {
+        let mut unoccupied = Vec::new();
+        let board_size = (self.width * self.width) as u128;
+
+        // Combined bitmap of all occupied cells (snakes + food)
+        let occupied_or_food = self.occupied | self.food;
+
+        for pos in 0..board_size {
+            if (occupied_or_food >> pos) & 1 == 0 {
+                unoccupied.push(pos);
+            }
+        }
+
+        unoccupied
+    }
+
+    /// Spawns food according to Battlesnake rules.
+    /// - If food count < minimum_food, spawn to reach minimum
+    /// - Otherwise, food_spawn_chance% probability to spawn 1 food
+    ///
+    /// Uses the provided RNG for deterministic testing or game simulation.
+    pub fn spawn_food<R: Rng>(&mut self, rng: &mut R) {
+        let current_food = self.count_food();
+
+        let food_to_spawn = if current_food < self.minimum_food {
+            // Spawn enough to reach minimum
+            self.minimum_food - current_food
+        } else if self.food_spawn_chance > 0 {
+            // Random chance to spawn 1 food
+            let roll: u8 = rng.gen_range(0..100);
+            if roll < self.food_spawn_chance { 1 } else { 0 }
+        } else {
+            0
+        };
+
+        if food_to_spawn == 0 {
+            return;
+        }
+
+        let mut unoccupied = self.get_unoccupied_points();
+
+        if unoccupied.is_empty() {
+            return; // No valid spawn locations
+        }
+
+        // Shuffle for random placement
+        unoccupied.shuffle(rng);
+
+        // Spawn food at the first N unoccupied positions
+        for pos in unoccupied.into_iter().take(food_to_spawn) {
+            self.food = set_index(self.food, pos, 1);
+        }
+    }
+
+    /// Advances the game turn with optional food spawning.
+    /// This follows the official Battlesnake turn order:
+    /// 1. Move snakes
+    /// 2. Check collisions/eliminations
+    /// 3. Feed snakes
+    /// 4. Spawn food (new)
+    pub fn advance_turn_with_spawning<R: Rng>(&mut self, moves: Vec<Move>, rng: &mut R) {
+        // Execute standard turn logic
+        self.advance_turn(moves);
+
+        // Spawn food after all other turn processing
+        self.spawn_food(rng);
     }
 
 
@@ -647,5 +746,191 @@ pub fn dir_to_index(head: u128, dir: &Direction, width: u128) -> u128 {
             Direction::Right => head + 1,
             Direction::Up => head + width,
             Direction::Down => head - width,
+    }
+}
+
+// Default food spawning settings (per official Battlesnake rules)
+pub const DEFAULT_FOOD_SPAWN_CHANCE: u8 = 15;
+pub const DEFAULT_MINIMUM_FOOD: usize = 1;
+
+#[cfg(test)]
+mod food_spawning_tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    #[test]
+    fn count_food_empty_board() {
+        let g = Game::create(vec![], vec![], 0, 11);
+        assert_eq!(g.count_food(), 0);
+    }
+
+    #[test]
+    fn count_food_multiple_items() {
+        let g = Game::create(vec![], vec![0, 5, 10, 60], 0, 11);
+        assert_eq!(g.count_food(), 4);
+    }
+
+    #[test]
+    fn get_unoccupied_excludes_snake_bodies() {
+        let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+        let g = Game::create(vec![s], vec![], 0, 11);
+        let unoccupied = g.get_unoccupied_points();
+
+        // Snake body positions should be excluded
+        assert!(!unoccupied.contains(&0));
+        assert!(!unoccupied.contains(&1));
+        assert!(!unoccupied.contains(&2));
+        // Other positions should be included
+        assert!(unoccupied.contains(&3));
+        assert!(unoccupied.contains(&60));
+    }
+
+    #[test]
+    fn get_unoccupied_excludes_existing_food() {
+        let g = Game::create(vec![], vec![5, 10, 60], 0, 11);
+        let unoccupied = g.get_unoccupied_points();
+
+        // Food positions should be excluded
+        assert!(!unoccupied.contains(&5));
+        assert!(!unoccupied.contains(&10));
+        assert!(!unoccupied.contains(&60));
+        // Other positions should be included
+        assert!(unoccupied.contains(&0));
+        assert!(unoccupied.contains(&3));
+    }
+
+    #[test]
+    fn get_unoccupied_excludes_both_snakes_and_food() {
+        let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+        let g = Game::create(vec![s], vec![5, 10], 0, 11);
+        let unoccupied = g.get_unoccupied_points();
+
+        // Snake and food positions should be excluded
+        assert!(!unoccupied.contains(&0));
+        assert!(!unoccupied.contains(&1));
+        assert!(!unoccupied.contains(&2));
+        assert!(!unoccupied.contains(&5));
+        assert!(!unoccupied.contains(&10));
+        // Other positions should be included
+        assert!(unoccupied.contains(&3));
+        assert!(unoccupied.contains(&60));
+        // Total should be 121 - 3 (snake) - 2 (food) = 116
+        assert_eq!(unoccupied.len(), 116);
+    }
+
+    #[test]
+    fn spawn_food_reaches_minimum_when_below() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut g = Game::create_with_spawning(vec![], vec![], 0, 11, 0, 3);
+
+        assert_eq!(g.count_food(), 0);
+        g.spawn_food(&mut rng);
+        assert_eq!(g.count_food(), 3);
+    }
+
+    #[test]
+    fn spawn_food_no_spawn_at_zero_chance() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut g = Game::create_with_spawning(vec![], vec![0], 0, 11, 0, 1);
+
+        assert_eq!(g.count_food(), 1);
+        g.spawn_food(&mut rng);
+        // With 0% chance and already at minimum, no spawn
+        assert_eq!(g.count_food(), 1);
+    }
+
+    #[test]
+    fn spawn_food_always_spawns_at_100_percent() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut g = Game::create_with_spawning(vec![], vec![0], 0, 11, 100, 1);
+
+        assert_eq!(g.count_food(), 1);
+        g.spawn_food(&mut rng);
+        // With 100% chance, should always spawn 1 more
+        assert_eq!(g.count_food(), 2);
+    }
+
+    #[test]
+    fn spawn_food_deterministic_with_seed() {
+        // Same seed should produce same results
+        let mut rng1 = StdRng::seed_from_u64(12345);
+        let mut rng2 = StdRng::seed_from_u64(12345);
+
+        let mut g1 = Game::create_with_spawning(vec![], vec![], 0, 11, 100, 2);
+        let mut g2 = Game::create_with_spawning(vec![], vec![], 0, 11, 100, 2);
+
+        g1.spawn_food(&mut rng1);
+        g2.spawn_food(&mut rng2);
+
+        // Both should have food at the same positions
+        assert_eq!(g1.food, g2.food);
+    }
+
+    #[test]
+    fn spawn_food_no_spawn_on_full_board() {
+        let mut rng = StdRng::seed_from_u64(42);
+        // Create a snake that fills the entire 11x11 board (121 cells)
+        let body: Vec<u128> = (0..121).collect();
+        let s = Snake::create(String::from("test"), 100, body);
+        let mut g = Game::create_with_spawning(vec![s], vec![], 0, 11, 100, 5);
+
+        g.spawn_food(&mut rng);
+        // No valid spawn locations, so no food spawned
+        assert_eq!(g.count_food(), 0);
+    }
+
+    #[test]
+    fn spawn_food_spawns_at_unoccupied_positions() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+        let mut g = Game::create_with_spawning(vec![s], vec![], 0, 11, 100, 2);
+
+        g.spawn_food(&mut rng);
+
+        // Food should not overlap with snake
+        assert_eq!(g.food & g.occupied, 0);
+        assert_eq!(g.count_food(), 2);
+    }
+
+    #[test]
+    fn spawn_food_probability_works_over_many_trials() {
+        // With 50% chance, roughly half should spawn over many trials
+        let mut spawn_count = 0;
+        let trials = 1000;
+
+        for seed in 0..trials {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut g = Game::create_with_spawning(vec![], vec![0], 0, 11, 50, 1);
+            let initial_food = g.count_food();
+            g.spawn_food(&mut rng);
+            if g.count_food() > initial_food {
+                spawn_count += 1;
+            }
+        }
+
+        // Should be roughly 500 (+/- reasonable variance)
+        // Allow for 40-60% range to avoid flaky tests
+        assert!(spawn_count > 400 && spawn_count < 600,
+            "Expected ~500 spawns with 50% chance, got {}", spawn_count);
+    }
+
+    #[test]
+    fn advance_turn_with_spawning_integrates_correctly() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let s = Snake::create(String::from("test"), 100, vec![5, 4, 3]);
+        let mut g = Game::create_with_spawning(vec![s], vec![], 0, 11, 100, 1);
+
+        g.advance_turn_with_spawning(
+            vec![(String::from("test"), Direction::Up)],
+            &mut rng
+        );
+
+        // Turn should advance
+        assert_eq!(g.turn, 1);
+        // Snake should have moved
+        assert_eq!(g.snakes[0].body[0], 16); // 5 + 11 = 16
+        // Food should have spawned (100% chance, minimum 1)
+        assert!(g.count_food() >= 1);
     }
 }
