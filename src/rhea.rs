@@ -722,12 +722,392 @@ impl RheaConfig {
     }
 }
 
+// ============================================================================
+// Negamax Override for RHEA
+// ============================================================================
+
+/// Simple negamax that focuses purely on survival (win/lose)
+/// Used to override RHEA when it's about to make a fatal move
+pub struct NegamaxOverride {
+    pub max_depth: usize,
+    pub bad_threshold: i32,
+}
+
+impl NegamaxOverride {
+    pub fn new(max_depth: usize, bad_threshold: i32) -> Self {
+        Self { max_depth, bad_threshold }
+    }
+
+    /// Check if a move leads to a bad position according to simple negamax
+    pub fn is_move_bad(&self, game: &Game, player: &String, direction: Direction) -> bool {
+        let score = self.evaluate_move(game, player, direction);
+        score < self.bad_threshold
+    }
+
+    /// Evaluate a specific move using simple negamax
+    fn evaluate_move(&self, game: &Game, player: &String, direction: Direction) -> i32 {
+        use crate::bitboard::is_dir_valid;
+
+        let player_snake = game.snakes.iter().find(|s| s.id == *player);
+        if player_snake.is_none() {
+            return -10000;
+        }
+        let player_snake = player_snake.unwrap();
+
+        // Check if move is even valid (into wall)
+        if !is_dir_valid(player_snake, &direction) {
+            return -10000;
+        }
+
+        // Find opponent
+        let opponent = game.snakes.iter()
+            .find(|s| s.id != *player && !s.is_eliminated());
+
+        // If no opponent, just simulate our move
+        if opponent.is_none() {
+            let mut game_clone = game.clone();
+            game_clone.advance_turn(vec![(player.clone(), direction)]);
+            return self.simple_negamax(&game_clone, player, self.max_depth - 1, i32::MIN + 1, i32::MAX);
+        }
+
+        let opponent = opponent.unwrap();
+        let opponent_id = opponent.id.clone();
+
+        // Get opponent's valid moves
+        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+        let opponent_moves: Vec<Direction> = directions
+            .iter()
+            .filter(|dir| is_dir_valid(opponent, dir))
+            .cloned()
+            .collect();
+
+        if opponent_moves.is_empty() {
+            let mut game_clone = game.clone();
+            game_clone.advance_turn(vec![(player.clone(), direction)]);
+            return self.simple_negamax(&game_clone, player, self.max_depth - 1, i32::MIN + 1, i32::MAX);
+        }
+
+        // Find worst case (opponent's best response)
+        let mut worst_score = i32::MAX;
+        for opp_dir in &opponent_moves {
+            let mut game_clone = game.clone();
+            game_clone.advance_turn(vec![
+                (player.clone(), direction),
+                (opponent_id.clone(), *opp_dir),
+            ]);
+
+            let score = self.simple_negamax(&game_clone, player, self.max_depth - 1, i32::MIN + 1, i32::MAX);
+            worst_score = worst_score.min(score);
+        }
+
+        worst_score
+    }
+
+    /// Get the best move according to simple negamax (for override)
+    pub fn get_best_move(&self, game: &Game, player: &String) -> Option<Direction> {
+        use crate::bitboard::is_dir_valid;
+
+        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+
+        let player_snake = game.snakes.iter().find(|s| s.id == *player)?;
+
+        // Filter valid moves for player
+        let player_moves: Vec<Direction> = directions
+            .iter()
+            .filter(|dir| is_dir_valid(player_snake, dir))
+            .cloned()
+            .collect();
+
+        if player_moves.is_empty() {
+            return None;
+        }
+
+        let mut best_move = player_moves[0];
+        let mut best_score = i32::MIN;
+
+        for dir in &player_moves {
+            let score = self.evaluate_move(game, player, *dir);
+            if score > best_score {
+                best_score = score;
+                best_move = *dir;
+            }
+        }
+
+        Some(best_move)
+    }
+
+    /// Get override move if RHEA's choice is bad
+    /// Returns Some(better_move) if override needed, None otherwise
+    pub fn get_override_move(&self, game: &Game, player: &String, rhea_move: Direction) -> Option<Direction> {
+        // Check if RHEA's move is bad
+        if !self.is_move_bad(game, player, rhea_move) {
+            return None; // RHEA's move is fine
+        }
+
+        // RHEA's move is bad, find a better one
+        let best_move = self.get_best_move(game, player)?;
+
+        // Only override if the best move is actually better
+        let rhea_score = self.evaluate_move(game, player, rhea_move);
+        let best_score = self.evaluate_move(game, player, best_move);
+
+        if best_score > rhea_score {
+            Some(best_move)
+        } else {
+            None // No better option found
+        }
+    }
+
+    /// Simple negamax that only cares about winning/losing
+    fn simple_negamax(&self, game: &Game, player: &String, depth: usize, mut alpha: i32, beta: i32) -> i32 {
+        use crate::bitboard::is_dir_valid;
+
+        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+
+        // Terminal conditions
+        let player_snake = game.snakes.iter().find(|s| s.id == *player);
+
+        // Check if player is eliminated
+        if player_snake.is_none() || player_snake.unwrap().is_eliminated() {
+            return -10000 + (self.max_depth - depth) as i32; // Prefer later death
+        }
+
+        // Check if we won (only one alive and it's us)
+        let alive_count = game.snakes.iter().filter(|s| !s.is_eliminated()).count();
+        if alive_count == 1 {
+            return 10000 - (self.max_depth - depth) as i32; // Prefer earlier win
+        }
+
+        // Depth limit reached - use simple evaluation
+        if depth == 0 {
+            return self.simple_evaluate(game, player);
+        }
+
+        let player_snake = player_snake.unwrap();
+
+        // Get opponent
+        let opponent = game.snakes.iter()
+            .find(|s| s.id != *player && !s.is_eliminated());
+
+        // Filter valid moves for player
+        let player_moves: Vec<Direction> = directions
+            .iter()
+            .filter(|dir| is_dir_valid(player_snake, dir))
+            .cloned()
+            .collect();
+
+        if player_moves.is_empty() {
+            return -10000 + (self.max_depth - depth) as i32;
+        }
+
+        // If no opponent, just maximize
+        if opponent.is_none() {
+            let mut best_score = i32::MIN + 1;
+            for dir in &player_moves {
+                let mut game_clone = game.clone();
+                game_clone.advance_turn(vec![(player.clone(), *dir)]);
+                let score = self.simple_negamax(&game_clone, player, depth - 1, alpha, beta);
+                best_score = best_score.max(score);
+                alpha = alpha.max(score);
+                if alpha >= beta {
+                    break;
+                }
+            }
+            return best_score;
+        }
+
+        let opponent = opponent.unwrap();
+        let opponent_id = opponent.id.clone();
+
+        let opponent_moves: Vec<Direction> = directions
+            .iter()
+            .filter(|dir| is_dir_valid(opponent, dir))
+            .cloned()
+            .collect();
+
+        let mut best_score = i32::MIN + 1;
+
+        // Max over our moves, min over opponent moves
+        for player_dir in &player_moves {
+            let mut worst_score = i32::MAX;
+
+            if opponent_moves.is_empty() {
+                let mut game_clone = game.clone();
+                game_clone.advance_turn(vec![(player.clone(), *player_dir)]);
+                worst_score = self.simple_negamax(&game_clone, player, depth - 1, alpha, beta);
+            } else {
+                for opp_dir in &opponent_moves {
+                    let mut game_clone = game.clone();
+                    game_clone.advance_turn(vec![
+                        (player.clone(), *player_dir),
+                        (opponent_id.clone(), *opp_dir),
+                    ]);
+
+                    let score = self.simple_negamax(&game_clone, player, depth - 1, alpha, beta);
+                    worst_score = worst_score.min(score);
+
+                    // Beta cutoff for the min level
+                    if worst_score <= alpha {
+                        break;
+                    }
+                }
+            }
+
+            best_score = best_score.max(worst_score);
+            alpha = alpha.max(best_score);
+
+            // Alpha cutoff for the max level
+            if alpha >= beta {
+                break;
+            }
+        }
+
+        best_score
+    }
+
+    /// Simple evaluation: only health (survival) matters
+    /// No voronoi, no complex positioning - just stay alive
+    fn simple_evaluate(&self, game: &Game, player: &String) -> i32 {
+        let player_snake = game.snakes.iter().find(|s| s.id == *player);
+
+        if player_snake.is_none() || player_snake.unwrap().is_eliminated() {
+            return -10000;
+        }
+
+        let player_snake = player_snake.unwrap();
+        let alive_count = game.snakes.iter().filter(|s| !s.is_eliminated()).count();
+
+        if alive_count == 1 {
+            return 5000; // We won
+        }
+
+        // Very simple: just health and a small length bonus
+        let mut score = player_snake.health;
+
+        // Small length advantage bonus
+        let max_opponent_length: usize = game.snakes.iter()
+            .filter(|s| s.id != *player && !s.is_eliminated())
+            .map(|s| s.length())
+            .max()
+            .unwrap_or(0);
+
+        let length_diff = player_snake.length() as i32 - max_opponent_length as i32;
+        score += length_diff * 5;
+
+        score
+    }
+}
+
+// ============================================================================
+// RHEA with Negamax Override
+// ============================================================================
+
+/// RHEA that uses negamax to override potentially fatal moves
+#[derive(Debug, Clone)]
+pub struct RheaWithOverride {
+    pub rhea: RHEA,
+    pub override_depth: usize,
+    pub override_threshold: i32,
+}
+
+impl RheaWithOverride {
+    pub fn create(game: Game, player: String) -> Self {
+        Self {
+            rhea: RHEA::create(game, player),
+            override_depth: 4,       // Shallow search for speed
+            override_threshold: -5000, // Override if score is very bad
+        }
+    }
+
+    pub fn create_with_config(game: Game, player: String, override_depth: usize, override_threshold: i32) -> Self {
+        Self {
+            rhea: RHEA::create(game, player),
+            override_depth,
+            override_threshold,
+        }
+    }
+
+    /// Get move with potential negamax override
+    pub fn get_move(&self) -> Direction {
+        let rhea_move = self.rhea.get_move();
+
+        // Create override checker
+        let override_check = NegamaxOverride::new(self.override_depth, self.override_threshold);
+
+        // Check if negamax thinks this move is terrible
+        if let Some(override_move) = override_check.get_override_move(&self.rhea.game, &self.rhea.player, rhea_move) {
+            println!("OVERRIDE: RHEA chose {:?}, negamax overriding to {:?}", rhea_move, override_move);
+            return override_move;
+        }
+
+        rhea_move
+    }
+
+    /// Update game state - uses RANDOM opponent modeling as requested
+    pub fn update_game(&self, game: Game) -> Self {
+        // Create updated RHEA with random opponent modeling for fitness evaluation
+        let mut rng = rand::rngs::SmallRng::from_entropy();
+        let updated_pop = self
+            .rhea
+            .pop
+            .iter()
+            .map(|c| {
+                let (_, rest) = c.genotype.split_at(1);
+
+                let mut new_geno = rest.to_vec();
+                new_geno.push(rng.gen());
+
+                let mut new_cand = create_candidate(new_geno);
+                // Use RANDOM opponent modeling on update
+                new_cand.fitness = fitness_with_opponent_modeling(&game, &self.rhea.player, &new_cand, OpponentModel::Random);
+
+                new_cand
+            })
+            .collect();
+
+        Self {
+            rhea: RHEA {
+                game,
+                pop: updated_pop,
+                ..self.rhea.clone()
+            },
+            override_depth: self.override_depth,
+            override_threshold: self.override_threshold,
+        }
+    }
+
+    /// Evolve the RHEA population (uses smart opponent modeling)
+    pub fn evolve(&self) -> Self {
+        Self {
+            rhea: self.rhea.evolve(),
+            override_depth: self.override_depth,
+            override_threshold: self.override_threshold,
+        }
+    }
+}
+
+/// Configuration for RHEA with override
+#[derive(Debug, Clone, Copy)]
+pub struct RheaOverrideConfig {
+    pub rhea_config: RheaConfig,
+    pub override_depth: usize,
+    pub override_threshold: i32,
+}
+
+impl RheaOverrideConfig {
+    pub fn new(rhea_config: RheaConfig, override_depth: usize, override_threshold: i32) -> Self {
+        Self { rhea_config, override_depth, override_threshold }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Algorithm {
     /// RHEA with configuration (opponent model, evolutions, population size)
     Rhea(RheaConfig),
     /// Negamax with alpha-beta pruning
     Negamax,
+    /// RHEA with negamax override for dangerous moves
+    RheaWithOverride(RheaOverrideConfig),
 }
 
 #[cfg(test)]
@@ -917,7 +1297,6 @@ mod tests {
     /// Creates and evolves a RHEA population, returning the best move
     fn run_rhea_evolution(game: &Game, player: &str, config: RheaConfig) -> Direction {
         let mut rng = SmallRng::from_entropy();
-        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
 
         // Create initial population
         let mut population: Vec<Individual> = (0..config.population_size)
@@ -997,6 +1376,91 @@ mod tests {
         population[0].genotype[0]
     }
 
+    /// Runs RHEA with negamax override for a single move decision
+    fn run_rhea_with_override(game: &Game, player: &str, config: RheaOverrideConfig) -> Direction {
+        let mut rng = SmallRng::from_entropy();
+
+        // Create initial population
+        let mut population: Vec<Individual> = (0..config.rhea_config.population_size)
+            .map(|_| {
+                let genotype: Vec<Direction> = (0..GENO_LENGTH).map(|_| rng.gen()).collect();
+                let mut ind = create_candidate(genotype);
+                ind.fitness = fitness_with_opponent_modeling(game, &player.to_string(), &ind, config.rhea_config.opponent_model);
+                ind
+            })
+            .collect();
+
+        population.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
+
+        // Evolution loop
+        for _ in 0..config.rhea_config.evolutions {
+            let apex = population[0].clone();
+
+            let pairs = (config.rhea_config.population_size / 2) + (config.rhea_config.population_size % 2);
+            let mut new_pop: Vec<Individual> = Vec::with_capacity(config.rhea_config.population_size);
+
+            // Tournament selection and crossover
+            for _ in 0..pairs {
+                let p1 = (0..3)
+                    .map(|_| &population[rng.gen_range(0..population.len())])
+                    .max_by_key(|i| i.fitness)
+                    .unwrap()
+                    .clone();
+
+                let p2 = (0..3)
+                    .map(|_| &population[rng.gen_range(0..population.len())])
+                    .max_by_key(|i| i.fitness)
+                    .unwrap()
+                    .clone();
+
+                let child1_geno: Vec<Direction> = p1.genotype.iter()
+                    .zip(p2.genotype.iter())
+                    .map(|(g1, g2)| if rng.gen::<bool>() { *g1 } else { *g2 })
+                    .collect();
+                let child2_geno: Vec<Direction> = p1.genotype.iter()
+                    .zip(p2.genotype.iter())
+                    .map(|(g1, g2)| if rng.gen::<bool>() { *g1 } else { *g2 })
+                    .collect();
+
+                new_pop.push(create_candidate(child1_geno));
+                new_pop.push(create_candidate(child2_geno));
+            }
+
+            new_pop.truncate(config.rhea_config.population_size - 1);
+
+            // Mutate
+            for ind in &mut new_pop {
+                for gene in &mut ind.genotype {
+                    if rng.gen::<f32>() < MUTATION_CHANCE {
+                        *gene = rng.gen();
+                    }
+                }
+            }
+
+            // Add apex (elitism)
+            new_pop.push(apex);
+
+            // Evaluate fitness
+            for ind in &mut new_pop {
+                ind.fitness = fitness_with_opponent_modeling(game, &player.to_string(), ind, config.rhea_config.opponent_model);
+            }
+
+            new_pop.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
+            population = new_pop;
+        }
+
+        // Get RHEA's best move
+        let rhea_move = population[0].genotype[0];
+
+        // Apply negamax override check
+        let override_check = NegamaxOverride::new(config.override_depth, config.override_threshold);
+        if let Some(override_move) = override_check.get_override_move(game, &player.to_string(), rhea_move) {
+            return override_move;
+        }
+
+        rhea_move
+    }
+
     /// Simulates a head-to-head game between two algorithms
     /// Returns: (player1_won, player2_won, draw)
     fn simulate_algorithm_matchup(p1_algo: Algorithm, p2_algo: Algorithm, max_turns: usize, seed: u64) -> (bool, bool, bool) {
@@ -1038,6 +1502,9 @@ mod tests {
                     }
                     Algorithm::Negamax => {
                         negamax.get_best_move(&game, &snake.id)
+                    }
+                    Algorithm::RheaWithOverride(config) => {
+                        run_rhea_with_override(&game, &snake.id, config)
                     }
                 };
 
@@ -1162,9 +1629,6 @@ mod tests {
 
     #[test]
     fn debug_voronoi_values() {
-        use rand::SeedableRng;
-        let mut rng = SmallRng::seed_from_u64(12345);
-
         // Fixed starting position
         let s1 = Snake::create(String::from("player1"), 100, vec![23, 12, 1]);
         let s2 = Snake::create(String::from("player2"), 100, vec![97, 108, 119]);
@@ -1333,5 +1797,105 @@ mod tests {
         let width_7 = 7u128;
         let center_7 = (width_7 * width_7) / 2;
         assert_eq!(center_7, 24u128); // 49 / 2 = 24 (center of 7x7)
+    }
+
+    #[test]
+    #[ignore] // Long-running test - run with: cargo test compare_rhea_with_override_vs_rhea -- --ignored --nocapture
+    fn compare_rhea_with_override_vs_rhea() {
+        const NUM_GAMES: usize = 10;
+        const MAX_TURNS: usize = 500;
+
+        // RHEA configuration
+        const RHEA_EVOLUTIONS: usize = 10;
+        const RHEA_POPULATION: usize = 50;
+
+        let rhea_config = RheaConfig::new(OpponentModel::Smart, RHEA_EVOLUTIONS, RHEA_POPULATION);
+        let rhea_override_config = RheaOverrideConfig::new(
+            rhea_config,
+            4,      // override depth
+            -5000,  // override threshold
+        );
+
+        println!("\n=== RHEA with Negamax Override vs Plain RHEA ===\n");
+        println!("Plain RHEA: {} evolutions, population {}, smart opponent modeling", RHEA_EVOLUTIONS, RHEA_POPULATION);
+        println!("RHEA+Override: same config + negamax override (depth 4, threshold -5000)");
+        println!("Each matchup: {} games, max {} turns\n", NUM_GAMES, MAX_TURNS);
+
+        // RHEA with Override vs Plain RHEA
+        println!("--- RHEA+OVERRIDE vs PLAIN RHEA ---");
+        let (override_w, plain_w, draws) = run_algorithm_matchup(
+            Algorithm::RheaWithOverride(rhea_override_config),
+            Algorithm::Rhea(rhea_config),
+            NUM_GAMES,
+            MAX_TURNS
+        );
+        println!("RHEA+Override wins: {} ({:.1}%)", override_w, (override_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Plain RHEA wins:    {} ({:.1}%)", plain_w, (plain_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:              {} ({:.1}%)\n", draws, (draws as f64 / NUM_GAMES as f64) * 100.0);
+
+        // Also test against negamax
+        println!("--- RHEA+OVERRIDE vs NEGAMAX ---");
+        let (override_w2, negamax_w, draws2) = run_algorithm_matchup(
+            Algorithm::RheaWithOverride(rhea_override_config),
+            Algorithm::Negamax,
+            NUM_GAMES,
+            MAX_TURNS
+        );
+        println!("RHEA+Override wins: {} ({:.1}%)", override_w2, (override_w2 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Negamax wins:       {} ({:.1}%)", negamax_w, (negamax_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:              {} ({:.1}%)\n", draws2, (draws2 as f64 / NUM_GAMES as f64) * 100.0);
+
+        // Summary
+        println!("=== SUMMARY ===");
+        println!("RHEA+Override total wins: {}", override_w + override_w2);
+        println!("Plain RHEA wins: {}", plain_w);
+        println!("Negamax wins: {}", negamax_w);
+
+        if override_w > plain_w {
+            println!("\nRHEA+Override BEATS Plain RHEA");
+        } else if plain_w > override_w {
+            println!("\nPlain RHEA BEATS RHEA+Override");
+        } else {
+            println!("\nRHEA+Override vs Plain RHEA: TIE");
+        }
+    }
+
+    #[test]
+    fn test_negamax_override_detects_bad_move() {
+        // Create a scenario where one move is clearly bad (leads to death)
+        // Snake at position 0 (left wall), opponent at 10
+        // Going left from position 0 would hit the wall
+        let s1 = Snake::create(String::from("player"), 100, vec![0, 1, 2]);
+        let s2 = Snake::create(String::from("opponent"), 100, vec![10, 21, 32]);
+        let game = Game::create(vec![s1, s2], vec![], 0, 11);
+
+        let override_check = NegamaxOverride::new(3, -5000);
+
+        // Going left would hit the wall - should be detected as very bad
+        let left_score = override_check.evaluate_move(&game, &String::from("player"), Direction::Left);
+        let up_score = override_check.evaluate_move(&game, &String::from("player"), Direction::Up);
+
+        println!("Left score: {}, Up score: {}", left_score, up_score);
+
+        // Left (into wall) should be -10000 or very negative
+        assert!(left_score < -9000, "Moving into wall should be very bad: {}", left_score);
+        assert!(override_check.is_move_bad(&game, &String::from("player"), Direction::Left));
+    }
+
+    #[test]
+    fn test_negamax_override_allows_good_move() {
+        // Create a normal game situation
+        let s1 = Snake::create(String::from("player"), 100, vec![60, 61, 62]);
+        let s2 = Snake::create(String::from("opponent"), 100, vec![30, 31, 32]);
+        let game = Game::create(vec![s1, s2], vec![49], 0, 11);
+
+        let override_check = NegamaxOverride::new(3, -5000);
+
+        // All moves should be acceptable (not triggering override)
+        let up_bad = override_check.is_move_bad(&game, &String::from("player"), Direction::Up);
+        let down_bad = override_check.is_move_bad(&game, &String::from("player"), Direction::Down);
+
+        // At least one direction should be fine
+        assert!(!up_bad || !down_bad, "At least one move should be acceptable");
     }
 }
