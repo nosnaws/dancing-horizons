@@ -226,11 +226,11 @@ mod tests {
 
         let mut g = Game::create(vec![s], vec![11], 0, 11);
         g.advance_turn(vec![(String::from("test"), Direction::Left)]);
-        dbg!(&g);
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.occupied, !0);
+        // When all snakes are eliminated, occupied should be 0 (no living snakes)
+        assert_eq!(g.occupied, 0);
     }
 
     #[test]
@@ -239,11 +239,10 @@ mod tests {
 
         let mut g = Game::create(vec![s], vec![11], 0, 11);
         g.advance_turn(vec![(String::from("test"), Direction::Down)]);
-        dbg!(&g);
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.occupied, !0);
+        assert_eq!(g.occupied, 0);
     }
 
     #[test]
@@ -252,11 +251,10 @@ mod tests {
 
         let mut g = Game::create(vec![s], vec![11], 0, 11);
         g.advance_turn(vec![(String::from("test"), Direction::Right)]);
-        dbg!(&g);
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.occupied, !0);
+        assert_eq!(g.occupied, 0);
     }
 
     #[test]
@@ -265,11 +263,10 @@ mod tests {
 
         let mut g = Game::create(vec![s], vec![11], 0, 11);
         g.advance_turn(vec![(String::from("test"), Direction::Up)]);
-        dbg!(&g);
 
         let s = &g.snakes[0];
         assert_eq!(s.health, 0);
-        assert_eq!(g.occupied, !0);
+        assert_eq!(g.occupied, 0);
     }
 
     #[test]
