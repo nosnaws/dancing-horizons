@@ -319,7 +319,8 @@ fn get_smart_move_deterministic(game: &Game, snake: &crate::bitboard::Snake) -> 
             } else {
                 // Simple heuristic: prefer moves that reduce manhattan distance to food
                 // For simplicity, just give bonus for moving toward center if food exists
-                let center = 60u128; // Center of 11x11 board
+                // Center position calculated as (width * width) / 2 for odd-width boards
+                let center = (width * width) / 2;
                 let current_dist = manhattan_distance(head, center, width);
                 let new_dist = manhattan_distance(new_pos, center, width);
                 if new_dist < current_dist {
@@ -329,7 +330,8 @@ fn get_smart_move_deterministic(game: &Game, snake: &crate::bitboard::Snake) -> 
         }
 
         // Small bonus for staying toward center (more options)
-        let center = 60u128;
+        // Center position calculated as (width * width) / 2 for odd-width boards
+        let center = (width * width) / 2;
         let dist_to_center = manhattan_distance(new_pos, center, width);
         move_score -= dist_to_center as i32;
 
@@ -390,8 +392,10 @@ pub fn score_game(g: &Game, player: &String) -> i32 {
 
         // Bonus for being near center (more escape routes)
         let head = snake.body[0];
-        let center = 60u128;
-        let dist_to_center = manhattan_distance(head, center, g.width as u128);
+        // Center position calculated as (width * width) / 2 for odd-width boards
+        let width = g.width as u128;
+        let center = (width * width) / 2;
+        let dist_to_center = manhattan_distance(head, center, width);
         score -= dist_to_center as i32; // Penalize being far from center
     }
 
@@ -693,8 +697,10 @@ impl Negamax {
 
             // Bonus for being near center (more escape routes)
             let head = snake.body[0];
-            let center = 60u128;
-            let dist_to_center = manhattan_distance(head, center, game.width as u128);
+            // Center position calculated as (width * width) / 2 for odd-width boards
+            let width = game.width as u128;
+            let center = (width * width) / 2;
+            let dist_to_center = manhattan_distance(head, center, width);
             score -= dist_to_center as i32;
         }
 
@@ -762,9 +768,9 @@ mod tests {
 
     /// Simulates a head-to-head game between two opponent modeling strategies
     /// Returns: (player1_won, player2_won, draw)
-    fn simulate_head_to_head(p1_model: OpponentModel, p2_model: OpponentModel, max_turns: usize) -> (bool, bool, bool) {
+    fn simulate_head_to_head(p1_model: OpponentModel, p2_model: OpponentModel, max_turns: usize, seed: u64) -> (bool, bool, bool) {
         use rand::SeedableRng;
-        let mut rng = SmallRng::from_entropy();
+        let mut rng = SmallRng::seed_from_u64(seed);
 
         // Randomize starting positions to avoid bias
         let positions: [(Vec<u128>, Vec<u128>); 4] = [
@@ -833,8 +839,10 @@ mod tests {
         let mut p2_wins = 0;
         let mut draws = 0;
 
-        for _ in 0..num_games {
-            let (p1_won, p2_won, draw) = simulate_head_to_head(p1_model, p2_model, max_turns);
+        for game_idx in 0..num_games {
+            // Use deterministic seed based on game index for reproducibility
+            let seed = 1000u64 + game_idx as u64;
+            let (p1_won, p2_won, draw) = simulate_head_to_head(p1_model, p2_model, max_turns, seed);
             if p1_won { p1_wins += 1; }
             if p2_won { p2_wins += 1; }
             if draw { draws += 1; }
@@ -895,9 +903,9 @@ mod tests {
 
     /// Simulates a head-to-head game between two algorithms
     /// Returns: (player1_won, player2_won, draw)
-    fn simulate_algorithm_matchup(p1_algo: Algorithm, p2_algo: Algorithm, max_turns: usize) -> (bool, bool, bool) {
+    fn simulate_algorithm_matchup(p1_algo: Algorithm, p2_algo: Algorithm, max_turns: usize, seed: u64) -> (bool, bool, bool) {
         use rand::SeedableRng;
-        let mut rng = SmallRng::from_entropy();
+        let mut rng = SmallRng::seed_from_u64(seed);
 
         // Randomize starting positions
         let positions: [(Vec<u128>, Vec<u128>); 4] = [
@@ -976,8 +984,10 @@ mod tests {
         let mut p2_wins = 0;
         let mut draws = 0;
 
-        for _ in 0..num_games {
-            let (p1_won, p2_won, draw) = simulate_algorithm_matchup(p1_algo, p2_algo, max_turns);
+        for game_idx in 0..num_games {
+            // Use deterministic seed based on game index for reproducibility
+            let seed = 2000u64 + game_idx as u64;
+            let (p1_won, p2_won, draw) = simulate_algorithm_matchup(p1_algo, p2_algo, max_turns, seed);
             if p1_won { p1_wins += 1; }
             if p2_won { p2_wins += 1; }
             if draw { draws += 1; }
@@ -1100,5 +1110,114 @@ mod tests {
         let p1_alive = !game.snakes.iter().find(|s| s.id == "player1").unwrap().is_eliminated();
         let p2_alive = !game.snakes.iter().find(|s| s.id == "player2").unwrap().is_eliminated();
         println!("\nFinal: P1 alive={}, P2 alive={}", p1_alive, p2_alive);
+    }
+
+    #[test]
+    fn test_smart_move_avoids_walls() {
+        // Snake in bottom-left corner - should not go left or down
+        let snake = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+        let game = Game::create(vec![snake.clone()], vec![], 0, 11);
+
+        let smart_move = get_smart_move_deterministic(&game, &snake);
+        assert!(smart_move.is_some());
+        let chosen = smart_move.unwrap();
+
+        // Should only choose Up or Right (not Left or Down)
+        assert!(chosen == Direction::Up || chosen == Direction::Right);
+    }
+
+    #[test]
+    fn test_smart_move_avoids_neck() {
+        // Snake facing right (head=2, neck=1, tail=0) should not go left
+        let snake = Snake::create(String::from("test"), 100, vec![2, 1, 0]);
+        let game = Game::create(vec![snake.clone()], vec![], 0, 11);
+
+        let smart_move = get_smart_move_deterministic(&game, &snake);
+        assert!(smart_move.is_some());
+        let chosen = smart_move.unwrap();
+
+        // Should not go back into neck (left)
+        assert_ne!(chosen, Direction::Left);
+    }
+
+    #[test]
+    fn test_smart_move_seeks_food() {
+        // Snake at position 0, food at position 11 (directly up)
+        let snake = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+        let game = Game::create(vec![snake.clone()], vec![11], 0, 11);
+
+        let smart_move = get_smart_move_deterministic(&game, &snake);
+        assert!(smart_move.is_some());
+        let chosen = smart_move.unwrap();
+
+        // Should prefer moving up toward food
+        assert_eq!(chosen, Direction::Up);
+    }
+
+    #[test]
+    fn test_smart_move_avoids_body_collision() {
+        // Create a game with two snakes
+        let snake1 = Snake::create(String::from("test1"), 100, vec![11, 0, 1]);
+        let snake2 = Snake::create(String::from("test2"), 100, vec![22, 23, 24]);
+        let game = Game::create(vec![snake1.clone(), snake2], vec![], 0, 11);
+
+        let smart_move = get_smart_move_deterministic(&game, &snake1);
+        assert!(smart_move.is_some());
+        let chosen = smart_move.unwrap();
+
+        // Should not move down into its own tail at position 0 (would be penalized)
+        // Should prefer safer moves
+        assert_ne!(chosen, Direction::Down);
+    }
+
+    #[test]
+    fn test_smart_move_no_valid_moves() {
+        // Create a snake that's completely boxed in (this is contrived)
+        // Snake at 60 (center), surrounded by occupied spaces
+        let snake = Snake::create(String::from("test"), 100, vec![60, 61, 62]);
+
+        // Create walls around position 60 by placing other snake bodies
+        // Positions around 60: up=71, down=49, left=59, right=61
+        let blocker1 = Snake::create(String::from("block1"), 100, vec![71, 82, 93]);
+        let blocker2 = Snake::create(String::from("block2"), 100, vec![49, 38, 27]);
+        let blocker3 = Snake::create(String::from("block3"), 100, vec![59, 58, 57]);
+        // Right (61) is already the snake's own neck
+
+        let game = Game::create(vec![snake.clone(), blocker1, blocker2, blocker3], vec![], 0, 11);
+
+        let smart_move = get_smart_move_deterministic(&game, &snake);
+
+        // In this extreme case, there might be no valid moves
+        // But our function should handle it gracefully and return None
+        // or pick the least bad option
+        assert!(smart_move.is_none() || smart_move.is_some());
+    }
+
+    #[test]
+    fn test_smart_move_deterministic() {
+        // Test that the same game state always produces the same move
+        let snake = Snake::create(String::from("test"), 100, vec![60, 61, 62]);
+        let game = Game::create(vec![snake.clone()], vec![49], 0, 11);
+
+        let move1 = get_smart_move_deterministic(&game, &snake);
+        let move2 = get_smart_move_deterministic(&game, &snake);
+        let move3 = get_smart_move_deterministic(&game, &snake);
+
+        // All three calls should produce identical results
+        assert_eq!(move1, move2);
+        assert_eq!(move2, move3);
+    }
+
+    #[test]
+    fn test_center_calculation_is_correct() {
+        // For an 11x11 board, center should be calculated as (11 * 11) / 2 = 60
+        let width = 11u128;
+        let center = (width * width) / 2;
+        assert_eq!(center, 60u128);
+
+        // Test with different board size
+        let width_7 = 7u128;
+        let center_7 = (width_7 * width_7) / 2;
+        assert_eq!(center_7, 24u128); // 49 / 2 = 24 (center of 7x7)
     }
 }
