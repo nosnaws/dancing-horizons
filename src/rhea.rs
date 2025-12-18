@@ -1081,6 +1081,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Long-running test - run with: cargo test compare_negamax_vs_rhea -- --ignored
     fn compare_negamax_vs_rhea() {
         const NUM_GAMES: usize = 10;
         const MAX_TURNS: usize = 500;
@@ -1123,6 +1124,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Long-running test - run with: cargo test compare_with_large_population -- --ignored
     fn compare_with_large_population() {
         const NUM_GAMES: usize = 10;
         const MAX_TURNS: usize = 500;
