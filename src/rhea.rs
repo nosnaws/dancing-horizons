@@ -708,11 +708,24 @@ impl Negamax {
     }
 }
 
-/// Algorithm selection for move decision
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Configuration for RHEA algorithm
+#[derive(Debug, Clone, Copy)]
+pub struct RheaConfig {
+    pub opponent_model: OpponentModel,
+    pub evolutions: usize,
+    pub population_size: usize,
+}
+
+impl RheaConfig {
+    pub fn new(opponent_model: OpponentModel, evolutions: usize, population_size: usize) -> Self {
+        Self { opponent_model, evolutions, population_size }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum Algorithm {
-    /// RHEA with specified opponent model
-    Rhea(OpponentModel),
+    /// RHEA with configuration (opponent model, evolutions, population size)
+    Rhea(RheaConfig),
     /// Negamax with alpha-beta pruning
     Negamax,
 }
@@ -901,6 +914,89 @@ mod tests {
         }
     }
 
+    /// Creates and evolves a RHEA population, returning the best move
+    fn run_rhea_evolution(game: &Game, player: &str, config: RheaConfig) -> Direction {
+        let mut rng = SmallRng::from_entropy();
+        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+
+        // Create initial population
+        let mut population: Vec<Individual> = (0..config.population_size)
+            .map(|_| {
+                let genotype: Vec<Direction> = (0..GENO_LENGTH).map(|_| rng.gen()).collect();
+                let mut ind = create_candidate(genotype);
+                ind.fitness = fitness_with_opponent_modeling(game, &player.to_string(), &ind, config.opponent_model);
+                ind
+            })
+            .collect();
+
+        population.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
+
+        // Evolution loop
+        for _ in 0..config.evolutions {
+            let apex = population[0].clone();
+
+            let pairs = (config.population_size / 2) + (config.population_size % 2);
+            let mut new_pop: Vec<Individual> = Vec::with_capacity(config.population_size);
+
+            // Tournament selection and crossover
+            for _ in 0..pairs {
+                // Tournament selection for parent 1
+                let p1 = (0..3)
+                    .map(|_| &population[rng.gen_range(0..population.len())])
+                    .max_by_key(|i| i.fitness)
+                    .unwrap()
+                    .clone();
+
+                // Tournament selection for parent 2
+                let p2 = (0..3)
+                    .map(|_| &population[rng.gen_range(0..population.len())])
+                    .max_by_key(|i| i.fitness)
+                    .unwrap()
+                    .clone();
+
+                // Uniform crossover
+                let child1_geno: Vec<Direction> = p1.genotype.iter()
+                    .zip(p2.genotype.iter())
+                    .map(|(g1, g2)| if rng.gen::<bool>() { *g1 } else { *g2 })
+                    .collect();
+                let child2_geno: Vec<Direction> = p1.genotype.iter()
+                    .zip(p2.genotype.iter())
+                    .map(|(g1, g2)| if rng.gen::<bool>() { *g1 } else { *g2 })
+                    .collect();
+
+                new_pop.push(create_candidate(child1_geno));
+                new_pop.push(create_candidate(child2_geno));
+            }
+
+            // Take population_size - 1 (leave room for apex)
+            new_pop.truncate(config.population_size - 1);
+
+            // Mutate
+            for ind in &mut new_pop {
+                for gene in &mut ind.genotype {
+                    if rng.gen::<f32>() < MUTATION_CHANCE {
+                        *gene = rng.gen();
+                    }
+                }
+            }
+
+            // Add apex (elitism)
+            new_pop.push(apex);
+
+            // Evaluate fitness
+            for ind in &mut new_pop {
+                ind.fitness = fitness_with_opponent_modeling(game, &player.to_string(), ind, config.opponent_model);
+            }
+
+            // Sort by fitness
+            new_pop.sort_unstable_by(|a, b| b.fitness.cmp(&a.fitness));
+            population = new_pop;
+        }
+
+        // Return best move
+        population[0].genotype[0]
+    }
+
     /// Simulates a head-to-head game between two algorithms
     /// Returns: (player1_won, player2_won, draw)
     fn simulate_algorithm_matchup(p1_algo: Algorithm, p2_algo: Algorithm, max_turns: usize, seed: u64) -> (bool, bool, bool) {
@@ -937,20 +1033,8 @@ mod tests {
                 let algo = if snake.id == "player1" { p1_algo } else { p2_algo };
 
                 let best_dir = match algo {
-                    Algorithm::Rhea(model) => {
-                        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
-                        let mut best = directions[rng.gen_range(0..4)];
-                        let mut best_score = i32::MIN;
-
-                        for dir in &directions {
-                            let candidate = create_candidate(vec![*dir; 5]);
-                            let score = fitness_with_opponent_modeling(&game, &snake.id, &candidate, model);
-                            if score > best_score {
-                                best_score = score;
-                                best = *dir;
-                            }
-                        }
-                        best
+                    Algorithm::Rhea(config) => {
+                        run_rhea_evolution(&game, &snake.id, config)
                     }
                     Algorithm::Negamax => {
                         negamax.get_best_move(&game, &snake.id)
@@ -997,20 +1081,27 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Long-running test - run with: cargo test compare_negamax_vs_rhea -- --ignored
     fn compare_negamax_vs_rhea() {
-        const NUM_GAMES: usize = 30;
+        const NUM_GAMES: usize = 10;
         const MAX_TURNS: usize = 500;
 
+        // RHEA configuration - larger population, fewer evolutions
+        const RHEA_EVOLUTIONS: usize = 10;  // 10 evolution cycles per move
+        const RHEA_POPULATION: usize = 50;  // Population size
+
+        let smart_rhea = RheaConfig::new(OpponentModel::Smart, RHEA_EVOLUTIONS, RHEA_POPULATION);
+
         println!("\n=== Negamax vs RHEA Tournament ===\n");
-        println!("Negamax depth: 4 (proper minimax over joint actions)");
-        println!("RHEA: Smart opponent modeling, 5-move lookahead");
+        println!("Negamax: depth 4 (minimax over joint actions with voronoi)");
+        println!("RHEA: {} evolutions, population {}, smart opponent modeling", RHEA_EVOLUTIONS, RHEA_POPULATION);
         println!("Each matchup: {} games, max {} turns\n", NUM_GAMES, MAX_TURNS);
 
         // Negamax vs Smart RHEA
         println!("--- NEGAMAX vs SMART RHEA ---");
         let (negamax_w, rhea_w, draws) = run_algorithm_matchup(
             Algorithm::Negamax,
-            Algorithm::Rhea(OpponentModel::Smart),
+            Algorithm::Rhea(smart_rhea),
             NUM_GAMES,
             MAX_TURNS
         );
@@ -1018,29 +1109,52 @@ mod tests {
         println!("Smart RHEA wins: {} ({:.1}%)", rhea_w, (rhea_w as f64 / NUM_GAMES as f64) * 100.0);
         println!("Draws:           {} ({:.1}%)\n", draws, (draws as f64 / NUM_GAMES as f64) * 100.0);
 
-        // Negamax vs Default RHEA
-        println!("--- NEGAMAX vs DEFAULT RHEA ---");
-        let (negamax_w2, default_w, draws2) = run_algorithm_matchup(
+        // Summary
+        println!("=== SUMMARY ===");
+        println!("Negamax wins: {}", negamax_w);
+        println!("RHEA wins:    {}", rhea_w);
+
+        if negamax_w > rhea_w {
+            println!("\nWINNER: Negamax alpha-beta");
+        } else if rhea_w > negamax_w {
+            println!("\nWINNER: RHEA");
+        } else {
+            println!("\nTIE");
+        }
+    }
+
+    #[test]
+    #[ignore] // Long-running test - run with: cargo test compare_with_large_population -- --ignored
+    fn compare_with_large_population() {
+        const NUM_GAMES: usize = 10;
+        const MAX_TURNS: usize = 500;
+
+        // RHEA with larger population
+        const RHEA_EVOLUTIONS: usize = 50;   // More evolution cycles
+        const RHEA_POPULATION: usize = 50;   // Larger population
+
+        let large_rhea = RheaConfig::new(OpponentModel::Smart, RHEA_EVOLUTIONS, RHEA_POPULATION);
+
+        println!("\n=== Large Population RHEA vs Negamax ===\n");
+        println!("Negamax: depth 4 with voronoi");
+        println!("RHEA: {} evolutions, population {}", RHEA_EVOLUTIONS, RHEA_POPULATION);
+        println!("Games: {}, max {} turns\n", NUM_GAMES, MAX_TURNS);
+
+        let (negamax_w, rhea_w, draws) = run_algorithm_matchup(
             Algorithm::Negamax,
-            Algorithm::Rhea(OpponentModel::Default),
+            Algorithm::Rhea(large_rhea),
             NUM_GAMES,
             MAX_TURNS
         );
-        println!("Negamax wins:     {} ({:.1}%)", negamax_w2, (negamax_w2 as f64 / NUM_GAMES as f64) * 100.0);
-        println!("Default RHEA wins: {} ({:.1}%)", default_w, (default_w as f64 / NUM_GAMES as f64) * 100.0);
-        println!("Draws:            {} ({:.1}%)\n", draws2, (draws2 as f64 / NUM_GAMES as f64) * 100.0);
 
-        // Summary
-        println!("=== SUMMARY ===");
-        let negamax_total = negamax_w + negamax_w2;
-        let rhea_total = rhea_w + default_w;
-        println!("Negamax total wins: {}", negamax_total);
-        println!("RHEA total wins:    {}", rhea_total);
+        println!("Negamax wins: {} ({:.1}%)", negamax_w, (negamax_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("RHEA wins:    {} ({:.1}%)", rhea_w, (rhea_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:        {} ({:.1}%)", draws, (draws as f64 / NUM_GAMES as f64) * 100.0);
 
-        if negamax_total > rhea_total {
-            println!("\nWINNER: Negamax alpha-beta");
-        } else if rhea_total > negamax_total {
-            println!("\nWINNER: RHEA");
+        if negamax_w > rhea_w {
+            println!("\nWINNER: Negamax");
+        } else if rhea_w > negamax_w {
+            println!("\nWINNER: Large Population RHEA");
         } else {
             println!("\nTIE");
         }
