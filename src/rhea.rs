@@ -709,7 +709,7 @@ impl Negamax {
 }
 
 /// Configuration for RHEA algorithm
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RheaConfig {
     pub opponent_model: OpponentModel,
     pub evolutions: usize,
@@ -722,7 +722,7 @@ impl RheaConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Algorithm {
     /// RHEA with configuration (opponent model, evolutions, population size)
     Rhea(RheaConfig),
