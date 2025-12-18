@@ -465,6 +465,54 @@ impl Game {
         unoccupied
     }
 
+    /// Returns unoccupied points for food spawning.
+    /// Per official Battlesnake rules, this excludes:
+    /// - Snake bodies
+    /// - Existing food
+    /// - Cells adjacent to snake heads (4 cardinal directions)
+    fn get_unoccupied_points_for_spawning(&self) -> Vec<u128> {
+        let board_size = (self.width * self.width) as u128;
+        let width = self.width as u128;
+
+        // Start with occupied cells (snakes + food)
+        let mut blocked = self.occupied | self.food;
+
+        // Add cells adjacent to non-eliminated snake heads
+        for snake in &self.snakes {
+            if snake.is_eliminated() {
+                continue;
+            }
+
+            let head = snake.head();
+            let row = head / width;
+            let col = head % width;
+
+            // Block adjacent cells (respecting board boundaries)
+            if col > 0 {
+                blocked |= 1 << (head - 1); // Left
+            }
+            if col < width - 1 {
+                blocked |= 1 << (head + 1); // Right
+            }
+            if row > 0 {
+                blocked |= 1 << (head - width); // Down
+            }
+            if row < width - 1 {
+                blocked |= 1 << (head + width); // Up
+            }
+        }
+
+        // Collect unoccupied points
+        let mut unoccupied = Vec::new();
+        for pos in 0..board_size {
+            if (blocked >> pos) & 1 == 0 {
+                unoccupied.push(pos);
+            }
+        }
+
+        unoccupied
+    }
+
     /// Spawns food according to Battlesnake rules.
     /// - If food count < minimum_food, spawn to reach minimum
     /// - Otherwise, food_spawn_chance% probability to spawn 1 food
@@ -478,7 +526,9 @@ impl Game {
             self.minimum_food - current_food
         } else if self.food_spawn_chance > 0 {
             // Random chance to spawn 1 food
-            let roll: u8 = rng.gen_range(0..100);
+            // Official formula: (100 - rand.Intn(100)) < foodSpawnChance
+            // Equivalent: roll in 1..=100, spawn if roll < food_spawn_chance
+            let roll: u8 = rng.gen_range(1..=100);
             if roll < self.food_spawn_chance { 1 } else { 0 }
         } else {
             0
@@ -488,7 +538,7 @@ impl Game {
             return;
         }
 
-        let mut unoccupied = self.get_unoccupied_points();
+        let mut unoccupied = self.get_unoccupied_points_for_spawning();
 
         if unoccupied.is_empty() {
             return; // No valid spawn locations
@@ -932,5 +982,79 @@ mod food_spawning_tests {
         assert_eq!(g.snakes[0].body[0], 16); // 5 + 11 = 16
         // Food should have spawned (100% chance, minimum 1)
         assert!(g.count_food() >= 1);
+    }
+
+    #[test]
+    fn get_unoccupied_for_spawning_excludes_head_adjacent() {
+        // Snake head at position 60 (center-ish of 11x11 board)
+        let s = Snake::create(String::from("test"), 100, vec![60, 59, 58]);
+        let g = Game::create(vec![s], vec![], 0, 11);
+        let unoccupied = g.get_unoccupied_points_for_spawning();
+
+        // Snake body positions should be excluded
+        assert!(!unoccupied.contains(&60)); // head
+        assert!(!unoccupied.contains(&59)); // body
+        assert!(!unoccupied.contains(&58)); // tail
+
+        // Head-adjacent positions should be excluded
+        assert!(!unoccupied.contains(&61)); // right of head
+        assert!(!unoccupied.contains(&71)); // up from head (60 + 11)
+        assert!(!unoccupied.contains(&49)); // down from head (60 - 11)
+        // Note: 59 (left of head) is already body
+
+        // Non-adjacent positions should be included
+        assert!(unoccupied.contains(&0));
+        assert!(unoccupied.contains(&120));
+    }
+
+    #[test]
+    fn get_unoccupied_for_spawning_respects_board_edges() {
+        // Snake head at corner position 0
+        let s = Snake::create(String::from("test"), 100, vec![0, 1, 2]);
+        let g = Game::create(vec![s], vec![], 0, 11);
+        let unoccupied = g.get_unoccupied_points_for_spawning();
+
+        // Head-adjacent within bounds should be excluded
+        assert!(!unoccupied.contains(&11)); // up from head
+        // Note: 1 (right of head) is already body
+        // Left and down would be out of bounds, so no crash
+
+        // Far positions should be included
+        assert!(unoccupied.contains(&120));
+        assert!(unoccupied.contains(&60));
+    }
+
+    #[test]
+    fn get_unoccupied_for_spawning_ignores_eliminated_snakes() {
+        let mut s = Snake::create(String::from("test"), 100, vec![60, 59, 58]);
+        s.health = 0; // Eliminate the snake
+        let g = Game::create(vec![s], vec![], 0, 11);
+
+        // Note: occupied is computed at create time, before elimination
+        // But get_unoccupied_points_for_spawning checks is_eliminated()
+        let unoccupied = g.get_unoccupied_points_for_spawning();
+
+        // Head-adjacent should NOT be excluded for eliminated snakes
+        assert!(unoccupied.contains(&61)); // right of head
+        assert!(unoccupied.contains(&71)); // up from head
+        assert!(unoccupied.contains(&49)); // down from head
+    }
+
+    #[test]
+    fn spawn_food_avoids_head_adjacent_cells() {
+        let mut rng = StdRng::seed_from_u64(42);
+        // Snake in center of small area to block many spawn points
+        let s = Snake::create(String::from("test"), 100, vec![60, 59, 58]);
+        let mut g = Game::create_with_spawning(vec![s], vec![], 0, 11, 100, 10);
+
+        g.spawn_food(&mut rng);
+
+        // Food should not be adjacent to head
+        let head = 60u128;
+        let adjacent_mask = (1 << (head + 1)) | (1 << (head + 11)) | (1 << (head - 11));
+        // Note: head - 1 = 59 is body, already excluded
+
+        assert_eq!(g.food & adjacent_mask, 0,
+            "Food should not spawn adjacent to snake head");
     }
 }
