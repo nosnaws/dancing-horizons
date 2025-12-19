@@ -720,54 +720,133 @@ impl Game {
 
     pub fn calculate_voronoi_scores(&self) -> std::collections::HashMap<String, i32> {
         use std::collections::{HashMap, VecDeque};
-        
-        let mut scores: HashMap<String, i32> = HashMap::new();
-        let mut visited = 0u128;
-        let mut queue: VecDeque<(u128, &Snake)> = VecDeque::new();
-        
-        // Initialize queue with all snake heads
-        for snake in &self.snakes {
+
+        let mut scores = vec![0i32; self.snakes.len()]; // Use Vec instead of HashMap
+        let mut distances: HashMap<u128, u32> = HashMap::new();
+        let mut owners: HashMap<u128, usize> = HashMap::new(); // Store snake index instead of ID
+        let mut queue: VecDeque<(u128, usize, u32)> = VecDeque::new(); // (pos, snake_idx, distance)
+
+        // Initialize queue with all snake heads at distance 0
+        for (snake_idx, snake) in self.snakes.iter().enumerate() {
             if !snake.is_eliminated() {
-                queue.push_back((snake.head(), snake));
-                visited |= snake.head_board;
-                scores.insert(snake.id.clone(), 0);
+                let head = snake.head();
+                queue.push_back((head, snake_idx, 0));
+                distances.insert(head, 0);
+                owners.insert(head, snake_idx);
             }
         }
-        
+
         // BFS from all snake heads simultaneously
-        while let Some((pos, snake)) = queue.pop_front() {
-            // Mark this cell as owned by this snake
-            scores.entry(snake.id.clone()).and_modify(|e| *e += 1);
+        let width = self.width as u128; // Hoist constant outside loop
 
-            // Check all four directions
-            for dir in [Direction::Up, Direction::Down, Direction::Left, Direction::Right].iter() {
-                // Check boundary conditions BEFORE computing next_pos to avoid overflow
-                let width = self.width as u128;
-                let row = pos / width;
-                let col = pos % width;
+        while let Some((pos, snake_idx, dist)) = queue.pop_front() {
+            let pos_board = 1u128 << pos; // Convert position to bitboard for boundary checks
+            let next_dist = dist + 1;
 
-                // Skip if trying to go out of bounds
-                if (*dir == Direction::Left && col == 0) ||
-                   (*dir == Direction::Right && col == width - 1) ||
-                   (*dir == Direction::Down && row == 0) ||
-                   (*dir == Direction::Up && row == width - 1) {
-                    continue;
+            // Unroll direction loop for better performance
+            // Check Up
+            if pos_board & TOP_MASK == 0 {
+                let next_pos = pos + width;
+                if self.occupied & (1 << next_pos) == 0 {
+                    match distances.get(&next_pos) {
+                        None => {
+                            distances.insert(next_pos, next_dist);
+                            owners.insert(next_pos, snake_idx);
+                            queue.push_back((next_pos, snake_idx, next_dist));
+                        }
+                        Some(&existing_dist) if next_dist == existing_dist => {
+                            if let Some(&existing_owner) = owners.get(&next_pos) {
+                                if existing_owner != snake_idx {
+                                    owners.remove(&next_pos);
+                                }
+                            }
+                        }
+                        _ => {} // Shorter path exists, skip
+                    }
                 }
+            }
 
-                let next_pos = dir_to_index(pos, dir, width);
-
-                // Skip if already visited or occupied
-                if (visited & (1 << next_pos) != 0) || // Already visited
-                   (self.occupied & (1 << next_pos) != 0) { // Occupied by snake body
-                    continue;
+            // Check Down
+            if pos_board & BOTTOM_MASK == 0 {
+                let next_pos = pos - width;
+                if self.occupied & (1 << next_pos) == 0 {
+                    match distances.get(&next_pos) {
+                        None => {
+                            distances.insert(next_pos, next_dist);
+                            owners.insert(next_pos, snake_idx);
+                            queue.push_back((next_pos, snake_idx, next_dist));
+                        }
+                        Some(&existing_dist) if next_dist == existing_dist => {
+                            if let Some(&existing_owner) = owners.get(&next_pos) {
+                                if existing_owner != snake_idx {
+                                    owners.remove(&next_pos);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
+            }
 
-                visited |= 1 << next_pos;
-                queue.push_back((next_pos, snake));
+            // Check Left
+            if pos_board & LEFT_MASK == 0 {
+                let next_pos = pos - 1;
+                if self.occupied & (1 << next_pos) == 0 {
+                    match distances.get(&next_pos) {
+                        None => {
+                            distances.insert(next_pos, next_dist);
+                            owners.insert(next_pos, snake_idx);
+                            queue.push_back((next_pos, snake_idx, next_dist));
+                        }
+                        Some(&existing_dist) if next_dist == existing_dist => {
+                            if let Some(&existing_owner) = owners.get(&next_pos) {
+                                if existing_owner != snake_idx {
+                                    owners.remove(&next_pos);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Check Right
+            if pos_board & RIGHT_MASK == 0 {
+                let next_pos = pos + 1;
+                if self.occupied & (1 << next_pos) == 0 {
+                    match distances.get(&next_pos) {
+                        None => {
+                            distances.insert(next_pos, next_dist);
+                            owners.insert(next_pos, snake_idx);
+                            queue.push_back((next_pos, snake_idx, next_dist));
+                        }
+                        Some(&existing_dist) if next_dist == existing_dist => {
+                            if let Some(&existing_owner) = owners.get(&next_pos) {
+                                if existing_owner != snake_idx {
+                                    owners.remove(&next_pos);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
-        
-        scores
+
+        // Count cells owned by each snake
+        for &snake_idx in owners.values() {
+            scores[snake_idx] += 1;
+        }
+
+        // Convert Vec scores to HashMap with snake IDs
+        let mut result: HashMap<String, i32> = HashMap::new();
+        for (idx, &score) in scores.iter().enumerate() {
+            if score > 0 {
+                result.insert(self.snakes[idx].id.clone(), score);
+            }
+        }
+
+        result
     }
 }
 
@@ -1053,5 +1132,133 @@ mod food_spawning_tests {
 
         assert_eq!(g.food & adjacent_mask, 0,
             "Food should not spawn adjacent to snake head");
+    }
+}
+
+#[cfg(test)]
+mod voronoi_tests {
+    use super::*;
+
+    #[test]
+    fn voronoi_single_snake_empty_board() {
+        let s = Snake::create(String::from("test"), 100, vec![60, 59, 58]);
+        let g = Game::create(vec![s], vec![], 0, 11);
+        let scores = g.calculate_voronoi_scores();
+
+        // Snake head counts + all unoccupied cells (1 head + 118 unoccupied = 119)
+        // Body cells (59, 58) are in occupied and not counted separately
+        assert_eq!(scores.get("test").copied().unwrap_or(0), 119);
+    }
+
+    #[test]
+    fn voronoi_two_snakes_opposite_corners() {
+        // Snake 1 at bottom-left corner
+        let s1 = Snake::create(String::from("snake1"), 100, vec![0, 1, 2]);
+        // Snake 2 at top-right corner
+        let s2 = Snake::create(String::from("snake2"), 100, vec![120, 119, 118]);
+        let g = Game::create(vec![s1, s2], vec![], 0, 11);
+        let scores = g.calculate_voronoi_scores();
+
+        let s1_score = scores.get("snake1").copied().unwrap_or(0);
+        let s2_score = scores.get("snake2").copied().unwrap_or(0);
+
+        // Both should have territory
+        assert!(s1_score > 0);
+        assert!(s2_score > 0);
+
+        // Equidistant cells should NOT be counted for either snake
+        // Total available: 2 heads + 115 unoccupied cells = 117
+        // Since there are equidistant cells, sum should be LESS than 117
+        assert!(s1_score + s2_score < 117);
+
+        // They should have roughly equal territory (symmetric positions)
+        // Allow for some asymmetry due to board geometry
+        let diff = (s1_score - s2_score).abs();
+        assert!(diff <= 2, "Territory difference too large: s1={}, s2={}, diff={}", s1_score, s2_score, diff);
+    }
+
+    #[test]
+    fn voronoi_sum_excludes_equidistant() {
+        let s1 = Snake::create(String::from("s1"), 100, vec![60, 61, 62]);
+        let s2 = Snake::create(String::from("s2"), 100, vec![10, 11, 12]);
+        let g = Game::create(vec![s1, s2], vec![], 0, 11);
+        let scores = g.calculate_voronoi_scores();
+
+        let total: i32 = scores.values().sum();
+        // Max possible: 2 heads + 115 unoccupied cells = 117
+        // But equidistant cells are excluded, so total < 117
+        assert!(total < 117, "Total should be less than 117 due to equidistant cells");
+        assert!(total > 0, "Both snakes should control some territory");
+    }
+
+    #[test]
+    fn voronoi_eliminated_snakes_dont_control() {
+        let mut s1 = Snake::create(String::from("s1"), 100, vec![60, 61, 62]);
+        s1.health = 100;
+        let s2 = Snake::create(String::from("s2"), 0, vec![10, 11, 12]); // eliminated
+
+        let g = Game::create(vec![s1, s2], vec![], 0, 11);
+        let scores = g.calculate_voronoi_scores();
+
+        // Only s1 should have territory
+        assert!(scores.get("s1").copied().unwrap_or(0) > 0);
+        assert_eq!(scores.get("s2").copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn voronoi_snake_body_blocks_expansion() {
+        // Create a long snake that acts as a wall
+        let wall = Snake::create(String::from("wall"), 100,
+            vec![55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65]); // horizontal line
+        let s1 = Snake::create(String::from("s1"), 100, vec![5, 6, 7]);
+        let s2 = Snake::create(String::from("s2"), 100, vec![115, 116, 117]);
+
+        let g = Game::create(vec![wall, s1, s2], vec![], 0, 11);
+        let scores = g.calculate_voronoi_scores();
+
+        // Wall should divide the board
+        let s1_score = scores.get("s1").copied().unwrap_or(0);
+        let s2_score = scores.get("s2").copied().unwrap_or(0);
+        let wall_score = scores.get("wall").copied().unwrap_or(0);
+
+        // All snakes should control some territory
+        assert!(s1_score > 0);
+        assert!(s2_score > 0);
+        assert!(wall_score > 0);
+
+        // Max possible: 3 heads + 104 unoccupied cells = 107
+        // But equidistant cells are excluded, so total <= 107
+        let total = s1_score + s2_score + wall_score;
+        assert!(total <= 107);
+    }
+
+    #[test]
+    fn voronoi_equidistant_cells_not_counted() {
+        // Two snakes side by side - many cells will be equidistant
+        let s1 = Snake::create(String::from("s1"), 100, vec![50, 49, 48]);
+        let s2 = Snake::create(String::from("s2"), 100, vec![52, 53, 54]);
+        let g = Game::create(vec![s1, s2], vec![], 0, 11);
+        let scores = g.calculate_voronoi_scores();
+
+        let s1_score = scores.get("s1").copied().unwrap_or(0);
+        let s2_score = scores.get("s2").copied().unwrap_or(0);
+        let total = s1_score + s2_score;
+
+        // Total available: 2 heads + (121 - 6) unoccupied = 117
+        // But cells equidistant from both heads should NOT be counted
+        assert!(total < 117, "Equidistant cells should not be counted. Got total={}", total);
+
+        // Both should still have some territory
+        assert!(s1_score > 0);
+        assert!(s2_score > 0);
+    }
+
+    #[test]
+    fn voronoi_empty_game() {
+        let g = Game::create(vec![], vec![], 0, 11);
+        let scores = g.calculate_voronoi_scores();
+
+        // Empty game should return empty HashMap
+        assert_eq!(scores.len(), 0);
     }
 }
