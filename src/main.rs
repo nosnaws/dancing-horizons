@@ -3,23 +3,76 @@ pub mod bitboard;
 pub mod rhea;
 
 use crate::battlesnake::{MoveRequest, MoveResponse, SnakeInfo};
-use crate::bitboard::{Direction, Game, Move, Snake};
-use crate::rhea::RHEA;
+use crate::rhea::{Algorithm, AlgorithmInstance, OpponentModel, RheaConfig};
 use actix_web::{
-    get, middleware, post, web, App, HttpRequest, HttpResponse, HttpServer, Responder,
+    middleware, web, App, HttpResponse, HttpServer, Responder,
 };
+use clap::Parser;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-struct DHState {
-    games: Mutex<HashMap<String, RHEA>>,
+#[derive(Parser, Debug)]
+#[command(name = "dancing-horizons")]
+#[command(about = "Battlesnake AI server using RHEA or Negamax algorithms")]
+struct Args {
+    /// Algorithm: "territorial" or "negamax"
+    #[arg(short, long, default_value = "territorial")]
+    algorithm: String,
+
+    /// Port to bind the server to
+    #[arg(short, long, default_value_t = 8080)]
+    port: u16,
 }
 
-async fn info() -> impl Responder {
+fn parse_algorithm(algo_str: &str) -> Algorithm {
+    match algo_str.to_lowercase().as_str() {
+        "territorial" => Algorithm::Rhea(RheaConfig {
+            opponent_model: OpponentModel::Territorial,
+            evolutions: 2,
+            population_size: 10,
+        }),
+        "negamax" => Algorithm::Negamax,
+        _ => {
+            eprintln!("Unknown algorithm '{}', defaulting to territorial", algo_str);
+            Algorithm::Rhea(RheaConfig {
+                opponent_model: OpponentModel::Territorial,
+                evolutions: 200,
+                population_size: 50,
+            })
+        }
+    }
+}
+
+struct DHState {
+    games: Mutex<HashMap<String, AlgorithmInstance>>,
+    algorithm_config: Algorithm,
+}
+
+async fn info(context: web::Data<DHState>) -> impl Responder {
+    let (color, head, tail) = match context.algorithm_config {
+        Algorithm::Rhea(ref config) => match config.opponent_model {
+            OpponentModel::Territorial => (
+                "#73937E".to_string(),  // cambridge blue
+                "space-helmet".to_string(),
+                "mlh-gene".to_string(),
+            ),
+            _ => (
+                "#888888".to_string(),  // gray fallback
+                "default".to_string(),
+                "default".to_string(),
+            ),
+        },
+        Algorithm::Negamax => (
+            "#FF6B35".to_string(),  // orange-red
+            "evil".to_string(),
+            "bolt".to_string(),
+        ),
+    };
+
     HttpResponse::Ok().json(SnakeInfo {
-        color: "#73937E".to_string(), // cambridge blue
-        head: "space-helmet".to_string(),
-        tail: "mlh-gene".to_string(),
+        color,
+        head,
+        tail,
     })
 }
 
@@ -29,19 +82,18 @@ async fn get_move(context: web::Data<DHState>, state: web::Json<MoveRequest>) ->
     let game = battlesnake::request_to_game(&state.0);
     let mut all_games = context.games.lock().expect("Failed to get games lock?");
 
-    let mut ga: RHEA = match all_games.get(&state.game.id) {
-        Some(g) => g.clone().update_game(game),
-        None => RHEA::create(game, state.you.id.clone()),
+    let mut algo_instance: AlgorithmInstance = match all_games.get(&state.game.id) {
+        Some(inst) => inst.clone().update_game(game),
+        None => AlgorithmInstance::create(
+            context.algorithm_config,
+            game,
+            state.you.id.clone()
+        ),
     };
 
-    // let mut ga = RHEA::create(game, state.you.id.clone());
-    for _ in 0..400 {
-        ga = ga.evolve();
-    }
+    let best_move = algo_instance.get_move();
 
-    let best_move = ga.get_move();
-
-    all_games.insert(state.game.id.clone(), ga);
+    all_games.insert(state.game.id.clone(), algo_instance);
     println!("Response: {:?}", best_move);
 
     HttpResponse::Ok().json(MoveResponse {
@@ -51,25 +103,19 @@ async fn get_move(context: web::Data<DHState>, state: web::Json<MoveRequest>) ->
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // let s = Snake::create(String::from("test1"), 100, vec![0, 1, 2]);
-    // // let s2 = Snake::create(String::from("test2"), 100, vec![10, 9, 8]);
+    let args = Args::parse();
 
-    // let g = Game::create(vec![s], vec![], 0, 11);
-    // g.print();
-
-    // let mut r = RHEA::create(g, String::from("test1"));
-
-    // for _i in 0..555 {
-    //     r = r.evolve();
-    // }
-    // println!("{:?}", r);
-    // let best_move = r.get_move();
-
-    // println!("move: {:?}", best_move);
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("debug"));
+
+    let algorithm = parse_algorithm(&args.algorithm);
+
+    println!("Starting Dancing Horizons server");
+    println!("  Algorithm: {:?}", algorithm);
+    println!("  Port: {}", args.port);
 
     let context = web::Data::new(DHState {
         games: Mutex::new(HashMap::new()),
+        algorithm_config: algorithm,
     });
 
     HttpServer::new(move || {
@@ -79,7 +125,7 @@ async fn main() -> std::io::Result<()> {
             .route("/move", web::post().to(get_move))
             .route("/", web::get().to(info))
     })
-    .bind(("127.0.0.1", 8080))?
+    .bind(("127.0.0.1", args.port))?
     .run()
     .await
 }

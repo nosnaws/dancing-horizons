@@ -19,6 +19,7 @@ pub struct RHEA {
     crossover_chance: f32,
     tournament_size: u32,
     population_size: usize,
+    opponent_model: OpponentModel,
 }
 
 type Population = Vec<Individual>;
@@ -32,14 +33,14 @@ const GENO_LENGTH: usize = 20;
 const MUTATION_CHANCE: f32 = 0.3;
 
 impl RHEA {
-    pub fn create(game: Game, player: String) -> Self {
+    pub fn create(game: Game, player: String, opponent_model: OpponentModel) -> Self {
         let crossover_chance = 1.0;
         let population_size = 50;
         let tournament_size = 3;
         let mut pop: Population = create_population(population_size, GENO_LENGTH)
             .iter()
             .map(|c| Individual {
-                fitness: fitness(&game, &player, &c),
+                fitness: fitness_with_opponent_modeling(&game, &player, &c, opponent_model),
                 ..c.clone()
             })
             .collect();
@@ -52,6 +53,7 @@ impl RHEA {
             crossover_chance,
             tournament_size,
             population_size,
+            opponent_model,
         }
     }
 
@@ -62,6 +64,7 @@ impl RHEA {
 
     pub fn update_game(&self, game: Game) -> Self {
         let mut rng = SmallRng::from_entropy();
+        let opponent_model = self.opponent_model;
         let updated_pop = self
             .pop
             .iter()
@@ -72,7 +75,7 @@ impl RHEA {
                 new_geno.push(rng.gen());
 
                 let mut new_cand = create_candidate(new_geno);
-                new_cand.fitness = fitness(&game, &self.player, &new_cand);
+                new_cand.fitness = fitness_with_opponent_modeling(&game, &self.player, &new_cand, opponent_model);
 
                 return new_cand;
             })
@@ -109,7 +112,7 @@ impl RHEA {
             // .map(|c| self.maybe_fix_bad_moves(&c))
             //  calculate fitness of population (& sort?)
             .map(|c| Individual {
-                fitness: fitness(&self.game, &self.player, &c),
+                fitness: fitness_with_opponent_modeling(&self.game, &self.player, &c, self.opponent_model),
                 ..c
             })
             .collect();
@@ -844,6 +847,56 @@ pub enum Algorithm {
     Negamax,
 }
 
+/// Wrapper that handles both stateful (RHEA) and stateless (Negamax) algorithms
+#[derive(Debug, Clone)]
+pub struct AlgorithmInstance {
+    config: Algorithm,
+    state: Option<RHEA>,  // Only used for RHEA (population warm-starting)
+    game: Game,
+    player_id: String,
+}
+
+impl AlgorithmInstance {
+    pub fn create(config: Algorithm, game: Game, player_id: String) -> Self {
+        let state = match &config {
+            Algorithm::Rhea(rhea_config) => Some(RHEA::create(game.clone(), player_id.clone(), rhea_config.opponent_model)),
+            Algorithm::Negamax => None,
+        };
+
+        Self { config, state, game, player_id }
+    }
+
+    pub fn update_game(mut self, game: Game) -> Self {
+        if let Some(rhea) = self.state {
+            self.state = Some(rhea.update_game(game.clone()));
+        }
+        self.game = game;
+        self
+    }
+
+    pub fn get_move(&mut self) -> Direction {
+        match (&self.config, &mut self.state) {
+            (Algorithm::Rhea(config), Some(rhea)) => {
+                let start = std::time::Instant::now();
+                for _ in 0..config.evolutions {
+                    *rhea = rhea.evolve();
+                }
+                let result = rhea.get_move();
+                println!("RHEA took {:?}", start.elapsed());
+                result
+            }
+            (Algorithm::Negamax, None) => {
+                let start = std::time::Instant::now();
+                let negamax = Negamax::new(3);
+                let result = negamax.get_best_move(&self.game, &self.player_id);
+                println!("Negamax took {:?}", start.elapsed());
+                result
+            }
+            _ => panic!("Invalid algorithm state"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,7 +923,7 @@ mod tests {
         let g = Game::create(vec![s], vec![], 0, 11);
         let c = create_population(1, 3);
         let geno_copy = c[0].genotype.clone();
-        let _r = RHEA::create(g, String::from("test"));
+        let _r = RHEA::create(g, String::from("test"), OpponentModel::Smart);
 
         // Use a fixed seed that produces no mutations (values > 0.7)
         let mut rng = SmallRng::seed_from_u64(42);
@@ -1513,5 +1566,114 @@ mod tests {
         let width_7 = 7u128;
         let center_7 = (width_7 * width_7) / 2;
         assert_eq!(center_7, 24u128); // 49 / 2 = 24 (center of 7x7)
+    }
+
+    /// Regression test for bug where RHEA thinks [Up, Right, ...] survives
+    /// when it actually leads to death
+    ///
+    /// Board state from Turn 154:
+    /// ⚕◦⚕◦◦◦◦⚕◦⚕◦  y=10
+    /// ◦◦◦◦◦◦◦◦◦⚕◦  y=9
+    /// ◦◦◦◦◦◦◦◦◦◦⚕  y=8
+    /// ◦◦◦◦◦◦◦◦◦◦◦  y=7
+    /// ◦◦◦◦◦◦⌀◦◦◦◦  y=6  <- Negamax head at (6, 6)
+    /// ◦■◦◦◦⌀⌀◦◦⚕◦  y=5  <- Territorial TAIL at (1, 5)
+    /// ◦■◦◦⚕⌀⌀⌀◦⚕◦  y=4
+    /// ◦■■■■◦◦⌀⌀⚕◦  y=3
+    /// ⚕◦◦◦■■◦◦⌀◦⚕  y=2
+    /// ⚕◦◦◦◦■■■◦⚕◦  y=1  <- Territorial HEAD at (7, 1)
+    /// ◦⚕◦◦◦◦⚕◦⚕◦◦  y=0
+    #[test]
+    fn test_turn_154_up_right_should_not_survive() {
+        // Territorial snake body (head to tail)
+        // HEAD at (7,1)=18 → (6,1)=17 → (5,1)=16 → (5,2)=27 → (4,2)=26 →
+        // (4,3)=37 → (3,3)=36 → (2,3)=35 → (1,3)=34 → (1,4)=45 → (1,5)=56 TAIL
+        let territorial = Snake::create(
+            String::from("territorial"),
+            100,
+            vec![18, 17, 16, 27, 26, 37, 36, 35, 34, 45, 56]
+        );
+
+        // Negamax snake body (head to tail)
+        // HEAD at (8,2)=30 → (8,3)=41 → (7,3)=40 → (7,4)=51 → (6,4)=50 →
+        // (5,4)=49 → (5,5)=60 → (6,5)=61 → (6,6)=72 TAIL
+        let negamax = Snake::create(
+            String::from("negamax"),
+            87,
+            vec![30, 41, 40, 51, 50, 49, 60, 61, 72]
+        );
+
+        // Food positions
+        let food = vec![110, 112, 117, 119, 108, 98, 64, 53, 48, 42, 32, 22, 20, 11, 8, 6, 1];
+
+        let game = Game::create(vec![territorial, negamax], food, 154, 11);
+
+        // The problematic genotype that was getting fitness 13286
+        let problematic_genotype = vec![
+            Direction::Up, Direction::Right, Direction::Up, Direction::Up, Direction::Up,
+            Direction::Left, Direction::Down, Direction::Left, Direction::Down, Direction::Left,
+            Direction::Left, Direction::Up, Direction::Up, Direction::Right, Direction::Up,
+            Direction::Left, Direction::Up, Direction::Up, Direction::Right, Direction::Up
+        ];
+
+        let candidate = Individual {
+            genotype: problematic_genotype,
+            fitness: 0,
+        };
+
+        // Calculate fitness using Territorial opponent model (the one we're testing)
+        let fitness_score = fitness_with_opponent_modeling(
+            &game,
+            &String::from("territorial"),
+            &candidate,
+            OpponentModel::Territorial
+        );
+
+        println!("Fitness for [Up, Right, ...] genotype with Territorial model: {}", fitness_score);
+
+        // Trace through moves to see what happens
+        let mut g = game.clone();
+        for (i, dir) in candidate.genotype.iter().enumerate() {
+            let player_snake = g.snakes.iter().find(|s| s.id == "territorial").unwrap();
+            let head = player_snake.body[0];
+            let x = head % 11;
+            let y = head / 11;
+            let is_dead = player_snake.is_eliminated();
+
+            // Also print Negamax position
+            let opp_info = if let Some(opp) = g.snakes.iter().find(|s| s.id == "negamax" && !s.is_eliminated()) {
+                let opp_head = opp.body[0];
+                let ox = opp_head % 11;
+                let oy = opp_head / 11;
+                format!("Negamax at ({}, {})", ox, oy)
+            } else {
+                "Negamax eliminated".to_string()
+            };
+
+            println!("Move {}: Territorial {:?} from ({}, {}), health={}, dead={} | {}",
+                i, dir, x, y, player_snake.health, is_dead, opp_info);
+
+            if is_dead {
+                println!("Snake died at move {}!", i);
+                break;
+            }
+
+            // Apply move with Territorial opponent model
+            let mut moves = vec![(String::from("territorial"), *dir)];
+            if let Some(opp) = g.snakes.iter().find(|s| s.id == "negamax" && !s.is_eliminated()) {
+                let opp_move = get_territorial_move_deterministic(&g, opp, &String::from("territorial")).unwrap_or(Direction::Up);
+                println!("  -> Negamax predicted move (Territorial model): {:?}", opp_move);
+                moves.push((String::from("negamax"), opp_move));
+            }
+            g.advance_turn(moves);
+        }
+
+        // The snake SHOULD die at some point in this sequence
+        // If fitness is very positive (like 13286), something is wrong
+        assert!(
+            fitness_score < 0,
+            "Fitness should be negative (snake should die), but got {}",
+            fitness_score
+        );
     }
 }
