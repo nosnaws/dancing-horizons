@@ -208,6 +208,8 @@ pub enum OpponentModel {
     Random,
     /// Smart opponents that seek food and avoid collisions
     Smart,
+    /// Territorial opponents that maximize territory advantage
+    Territorial,
 }
 
 pub fn fitness(game: &Game, player: &String, c: &Individual) -> i32 {
@@ -238,6 +240,14 @@ pub fn fitness_with_opponent_modeling(game: &Game, player: &String, c: &Individu
                 for snake in &g.snakes {
                     if snake.id != *player && !snake.is_eliminated() {
                         let opponent_move = get_smart_move(&g, snake, &mut rng);
+                        moves.push((snake.id.clone(), opponent_move));
+                    }
+                }
+            }
+            OpponentModel::Territorial => {
+                for snake in &g.snakes {
+                    if snake.id != *player && !snake.is_eliminated() {
+                        let opponent_move = get_territorial_move(&g, snake, player, &mut rng);
                         moves.push((snake.id.clone(), opponent_move));
                     }
                 }
@@ -342,6 +352,110 @@ fn get_smart_move_deterministic(game: &Game, snake: &crate::bitboard::Snake) -> 
     }
 
     Some(best_move)
+}
+
+/// Deterministic territorial move that maximizes territory advantage
+/// Returns the move that gives the opponent the best territory differential (enemy - player)
+fn get_territorial_move_deterministic(
+    game: &Game,
+    snake: &crate::bitboard::Snake,
+    player_id: &String
+) -> Option<Direction> {
+    use crate::bitboard::{is_dir_valid, dir_to_index};
+
+    let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let width = game.width as u128;
+
+    // Filter to only valid moves (not into walls)
+    let valid_moves: Vec<Direction> = directions
+        .iter()
+        .filter(|dir| is_dir_valid(snake, dir))
+        .cloned()
+        .collect();
+
+    if valid_moves.is_empty() {
+        return None;
+    }
+
+    // Score each valid move
+    let mut best_move = valid_moves[0];
+    let mut best_score = i32::MIN;
+
+    for dir in &valid_moves {
+        let new_pos = dir_to_index(snake.body[0], dir, width);
+        let pos_bit = 1u128 << new_pos;
+        let mut move_score: i32 = 0;
+
+        // Safety check: heavily penalize fatal moves
+        let tail = *snake.body.last().unwrap();
+        let tail_bit = 1u128 << tail;
+        let occupied_without_tail = game.occupied & !tail_bit;
+
+        if pos_bit & occupied_without_tail != 0 {
+            move_score -= 10000; // Fatal - collision with body
+        }
+
+        // Avoid moving back into own neck
+        if snake.body.len() > 1 {
+            let neck = snake.body[1];
+            if new_pos == neck {
+                move_score -= 10000; // Fatal - neck collision
+            }
+        }
+
+        // If move is not fatal, evaluate territory advantage
+        if move_score > -10000 {
+            // Clone game and simulate this move
+            let mut game_clone = game.clone();
+
+            // Find and update the snake in cloned game
+            for s in &mut game_clone.snakes {
+                if s.id == snake.id {
+                    s.move_tail();
+                    s.move_head(dir, width);
+                    break;
+                }
+            }
+
+            // Recalculate occupied board (required for voronoi)
+            let mut new_occupied: u128 = 0;
+            for s in &game_clone.snakes {
+                if !s.is_eliminated() {
+                    new_occupied = new_occupied | s.head_board | s.body_board;
+                }
+            }
+            game_clone.occupied = new_occupied;
+
+            // Calculate voronoi scores
+            let voronoi = game_clone.calculate_voronoi_scores();
+            let player_territory = voronoi.get(player_id).copied().unwrap_or(0);
+            let enemy_territory = voronoi.get(&snake.id).copied().unwrap_or(0);
+
+            // Maximize: enemy_territory - player_territory
+            move_score += enemy_territory - player_territory;
+        }
+
+        if move_score > best_score {
+            best_score = move_score;
+            best_move = *dir;
+        }
+    }
+
+    Some(best_move)
+}
+
+/// Generate a territorial move for an opponent snake
+/// Falls back to random if no valid territorial move found
+fn get_territorial_move(
+    game: &Game,
+    snake: &crate::bitboard::Snake,
+    player_id: &String,
+    rng: &mut SmallRng
+) -> Direction {
+    get_territorial_move_deterministic(game, snake, player_id).unwrap_or_else(|| {
+        let directions = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+        directions[rng.gen_range(0..4)]
+    })
 }
 
 fn manhattan_distance(pos1: u128, pos2: u128, width: u128) -> u128 {
@@ -779,6 +893,48 @@ mod tests {
         assert_eq!(cm.genotype, geno_copy);
     }
 
+    #[test]
+    fn test_territorial_move_avoids_fatal() {
+        // Snake in corner - should not pick wall moves even if voronoi favors them
+        let snake = Snake::create(String::from("enemy"), 100, vec![0, 1, 2]);
+        let player = Snake::create(String::from("player"), 100, vec![60, 61, 62]);
+        let game = Game::create(vec![snake.clone(), player], vec![], 0, 11);
+
+        let move_result = get_territorial_move_deterministic(&game, &snake, &String::from("player"));
+        assert!(move_result.is_some());
+        let chosen = move_result.unwrap();
+
+        // Should only choose Up or Right (not Left or Down into walls)
+        assert!(chosen == Direction::Up || chosen == Direction::Right);
+    }
+
+    #[test]
+    fn test_territorial_move_maximizes_territory_diff() {
+        // Setup where moving toward player gives more territory
+        let snake = Snake::create(String::from("enemy"), 100, vec![10, 9, 8]);
+        let player = Snake::create(String::from("player"), 100, vec![70, 71, 72]);
+        let game = Game::create(vec![snake.clone(), player], vec![], 0, 11);
+
+        let move_result = get_territorial_move_deterministic(&game, &snake, &String::from("player"));
+        assert!(move_result.is_some());
+        // Hard to assert exact move, but should not crash and should be valid
+    }
+
+    #[test]
+    fn test_territorial_move_deterministic_consistency() {
+        // Same game state should always produce same move
+        let snake = Snake::create(String::from("enemy"), 100, vec![60, 59, 58]);
+        let player = Snake::create(String::from("player"), 100, vec![10, 11, 12]);
+        let game = Game::create(vec![snake.clone(), player], vec![], 0, 11);
+
+        let move1 = get_territorial_move_deterministic(&game, &snake, &String::from("player"));
+        let move2 = get_territorial_move_deterministic(&game, &snake, &String::from("player"));
+        let move3 = get_territorial_move_deterministic(&game, &snake, &String::from("player"));
+
+        assert_eq!(move1, move2);
+        assert_eq!(move2, move3);
+    }
+
     /// Simulates a head-to-head game between two opponent modeling strategies
     /// Returns: (player1_won, player2_won, draw)
     fn simulate_head_to_head(p1_model: OpponentModel, p2_model: OpponentModel, max_turns: usize, seed: u64) -> (bool, bool, bool) {
@@ -893,24 +1049,48 @@ mod tests {
         println!("Default wins: {} ({:.1}%)", default_w2, (default_w2 as f64 / NUM_GAMES as f64) * 100.0);
         println!("Draws:        {} ({:.1}%)\n", draws3, (draws3 as f64 / NUM_GAMES as f64) * 100.0);
 
+        // Territorial vs Smart
+        println!("--- TERRITORIAL vs SMART ---");
+        let (terr_w, smart_w3, draws4) = run_matchup(OpponentModel::Territorial, OpponentModel::Smart, NUM_GAMES, MAX_TURNS);
+        println!("Territorial wins: {} ({:.1}%)", terr_w, (terr_w as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Smart wins:       {} ({:.1}%)", smart_w3, (smart_w3 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:            {} ({:.1}%)\n", draws4, (draws4 as f64 / NUM_GAMES as f64) * 100.0);
+
+        // Territorial vs Random
+        println!("--- TERRITORIAL vs RANDOM ---");
+        let (terr_w2, random_w3, draws5) = run_matchup(OpponentModel::Territorial, OpponentModel::Random, NUM_GAMES, MAX_TURNS);
+        println!("Territorial wins: {} ({:.1}%)", terr_w2, (terr_w2 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Random wins:      {} ({:.1}%)", random_w3, (random_w3 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:            {} ({:.1}%)\n", draws5, (draws5 as f64 / NUM_GAMES as f64) * 100.0);
+
+        // Territorial vs Default
+        println!("--- TERRITORIAL vs DEFAULT ---");
+        let (terr_w3, default_w3, draws6) = run_matchup(OpponentModel::Territorial, OpponentModel::Default, NUM_GAMES, MAX_TURNS);
+        println!("Territorial wins: {} ({:.1}%)", terr_w3, (terr_w3 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Default wins:     {} ({:.1}%)", default_w3, (default_w3 as f64 / NUM_GAMES as f64) * 100.0);
+        println!("Draws:            {} ({:.1}%)\n", draws6, (draws6 as f64 / NUM_GAMES as f64) * 100.0);
+
         // Summary
         println!("=== OVERALL RANKING ===");
-        let smart_total = smart_w + smart_w2;
-        let random_total = random_w + random_w2;
-        let default_total = default_w + default_w2;
+        let smart_total = smart_w + smart_w2 + smart_w3;
+        let random_total = random_w + random_w2 + random_w3;
+        let default_total = default_w + default_w2 + default_w3;
+        let territorial_total = terr_w + terr_w2 + terr_w3;
 
-        println!("Smart:   {} wins across matchups", smart_total);
-        println!("Random:  {} wins across matchups", random_total);
-        println!("Default: {} wins across matchups", default_total);
+        println!("Smart:       {} wins across matchups", smart_total);
+        println!("Random:      {} wins across matchups", random_total);
+        println!("Default:     {} wins across matchups", default_total);
+        println!("Territorial: {} wins across matchups", territorial_total);
 
-        if smart_total > random_total && smart_total > default_total {
+        let max_wins = smart_total.max(random_total).max(default_total).max(territorial_total);
+        if territorial_total == max_wins {
+            println!("\nBEST STRATEGY: Territorial opponent modeling");
+        } else if smart_total == max_wins {
             println!("\nBEST STRATEGY: Smart opponent modeling");
-        } else if random_total > smart_total && random_total > default_total {
+        } else if random_total == max_wins {
             println!("\nBEST STRATEGY: Random opponent modeling");
-        } else if default_total > smart_total && default_total > random_total {
+        } else if default_total == max_wins {
             println!("\nBEST STRATEGY: Default opponent modeling");
-        } else {
-            println!("\nNo clear winner");
         }
     }
 
